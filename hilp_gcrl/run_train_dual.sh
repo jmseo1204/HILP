@@ -7,7 +7,7 @@
 
 set -e
 
-WORKSPACE_ROOT="/mnt/c/Users/USER/Desktop/test_ogbench"
+WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 
