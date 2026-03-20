@@ -103,7 +103,9 @@ class GCVFDual(flax.struct.PyTreeNode):
 
     def total_loss(self, batch, grad_params, phi_g):
         loss, info = self.value_loss(batch, grad_params, phi_g)
-        return loss, {f'gcvf/{k}': v for k, v in info.items()}
+        log = {f'gcvf/{k}': v for k, v in info.items()}
+        log['loss'] = loss
+        return loss, log
 
     def update(self, batch, phi_g, pmap_axis=None):
         new_network, info = self.network.apply_loss_fn(

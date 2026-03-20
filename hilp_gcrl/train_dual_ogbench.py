@@ -131,7 +131,9 @@ class DualHILP(flax.struct.PyTreeNode):
 
     def total_loss(self, batch, grad_params):
         loss, info = self.value_loss(batch, grad_params)
-        return loss, {f'value/{k}': v for k, v in info.items()}
+        log = {f'value/{k}': v for k, v in info.items()}
+        log['loss'] = loss
+        return loss, log
 
     def update(self, batch, pmap_axis=None):
         new_network, info = self.network.apply_loss_fn(
