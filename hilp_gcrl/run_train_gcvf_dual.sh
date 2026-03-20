@@ -43,7 +43,7 @@ echo "  train_steps     : ${TRAIN_STEPS}"
 echo "  save_dir        : ${SAVE_DIR}"
 echo "============================================"
 
-docker run --gpus all --rm \
+docker run --gpus '"device=0,1"' --rm \
     -v "${WORKSPACE_ROOT}:/workspace" \
     -v "${OGBENCH_DATA_DIR}:/home/junjolp2026spring/.ogbench/data" \
     -w /workspace/HILP/hilp_gcrl \
