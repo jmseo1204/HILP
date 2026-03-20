@@ -25,7 +25,7 @@ def shard_batch(batch):
 def target_update(
     model: "TrainState", target_model: "TrainState", tau: float
 ) -> "TrainState":
-    new_target_params = jax.tree_map(
+    new_target_params = jax.tree.map(
         lambda p, tp: p * tau + tp * (1 - tau), model.params, target_model.params
     )
     return target_model.replace(params=new_target_params)
@@ -160,9 +160,9 @@ class TrainState(flax.struct.PyTreeNode):
                 info = jax.lax.pmean(info, axis_name=pmap_axis)
 
             # Compute grad stats
-            grad_max = jax.tree_map(jnp.max, grads)
-            grad_min = jax.tree_map(jnp.min, grads)
-            grad_norm = jax.tree_map(jnp.linalg.norm, grads)
+            grad_max = jax.tree.map(jnp.max, grads)
+            grad_min = jax.tree.map(jnp.min, grads)
+            grad_norm = jax.tree.map(jnp.linalg.norm, grads)
 
             grad_max_flat = jnp.concatenate([jnp.reshape(x, -1) for x in jax.tree_util.tree_leaves(grad_max)], axis=0)
             grad_min_flat = jnp.concatenate([jnp.reshape(x, -1) for x in jax.tree_util.tree_leaves(grad_min)], axis=0)

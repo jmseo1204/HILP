@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import flax
 import flax.linen as nn
 import optax
-from flax.core import freeze, unfreeze
+from flax.core import unfreeze
 from absl import app, flags
 import tqdm
 
@@ -36,26 +36,6 @@ from train_dual_ogbench import DualHILP, save_agent, restore_agent
 # -----------------------------------------------------------------------------
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string ('env_name',            'pointmaze-large-stitch-v0', 'OGBench env.')
-flags.DEFINE_string ('dual_restore_path',   'exp/dual_repr',  'Phase-1 checkpoint dir.')
-flags.DEFINE_integer('dual_restore_epoch',  1000000,          'Phase-1 checkpoint step.')
-flags.DEFINE_float  ('lr',                  3e-4,    'Learning rate.')
-flags.DEFINE_multi_integer('value_hidden_dims', [512, 512, 512], 'Hidden dims.')
-flags.DEFINE_integer('skill_dim',           32,      'Must match Phase-1 skill_dim.')
-flags.DEFINE_float  ('discount',            0.99,    'Discount.')
-flags.DEFINE_float  ('tau',                 0.005,   'Target EMA rate.')
-flags.DEFINE_float  ('expectile',           0.95,    'Expectile.')
-flags.DEFINE_integer('use_layer_norm',      1,       '1 = LayerNorm.')
-flags.DEFINE_integer('batch_size',          1024,    'Batch size.')
-flags.DEFINE_integer('train_steps',         500000,  'Training steps.')
-flags.DEFINE_integer('save_interval',       100000,  'Checkpoint interval.')
-flags.DEFINE_integer('log_interval',        1000,    'Log interval.')
-flags.DEFINE_string ('save_dir',            'exp/gcvf_dual', 'Output dir.')
-flags.DEFINE_integer('seed',               0,        'Seed.')
-flags.DEFINE_float  ('p_currgoal',          0.0,     '')
-flags.DEFINE_float  ('p_trajgoal',          0.625,   '')
-flags.DEFINE_float  ('p_randomgoal',        0.375,   '')
-flags.DEFINE_integer('geom_sample',         1,       '')
 
 
 # ======================== Network ============================================
@@ -129,14 +109,14 @@ class GCVFDual(flax.struct.PyTreeNode):
         new_network, info = self.network.apply_loss_fn(
             loss_fn=lambda p: self.total_loss(batch, p, phi_g), has_aux=True)
 
-        new_tp = jax.tree_map(
+        new_tp = jax.tree.map(
             lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
             new_network.params['networks_value'],
             new_network.params['networks_target_value'],
         )
-        params = unfreeze(new_network.params)
+        params = dict(new_network.params)
         params['networks_target_value'] = new_tp
-        new_network = new_network.replace(params=freeze(params))
+        new_network = new_network.replace(params=params)
 
         return self.replace(network=new_network), info
 
@@ -166,13 +146,13 @@ class GCVFDual(flax.struct.PyTreeNode):
             'target_value': copy.deepcopy(value_def),
         })
         network_tx     = optax.adam(learning_rate=lr)
-        network_params = network_def.init(
-            init_rng, ex_observations, ex_phi_g)['params']
+        network_params = unfreeze(network_def.init(
+            init_rng, ex_observations, ex_phi_g)['params'])
         network = TrainState.create(network_def, network_params, tx=network_tx)
 
-        params = unfreeze(network.params)
+        params = dict(network.params)
         params['networks_target_value'] = params['networks_value']
-        network = network.replace(params=freeze(params))
+        network = network.replace(params=params)
 
         return cls(network=network,
                    config=flax.core.FrozenDict(
@@ -248,4 +228,24 @@ def main(_):
 
 
 if __name__ == '__main__':
+    flags.DEFINE_string ('env_name',            'pointmaze-large-stitch-v0', 'OGBench env.')
+    flags.DEFINE_string ('dual_restore_path',   'exp/dual_repr',  'Phase-1 checkpoint dir.')
+    flags.DEFINE_integer('dual_restore_epoch',  1000000,          'Phase-1 checkpoint step.')
+    flags.DEFINE_float  ('lr',                  3e-4,    'Learning rate.')
+    flags.DEFINE_multi_integer('value_hidden_dims', [512, 512, 512], 'Hidden dims.')
+    flags.DEFINE_integer('skill_dim',           32,      'Must match Phase-1 skill_dim.')
+    flags.DEFINE_float  ('discount',            0.99,    'Discount.')
+    flags.DEFINE_float  ('tau',                 0.005,   'Target EMA rate.')
+    flags.DEFINE_float  ('expectile',           0.95,    'Expectile.')
+    flags.DEFINE_integer('use_layer_norm',      1,       '1 = LayerNorm.')
+    flags.DEFINE_integer('batch_size',          1024,    'Batch size.')
+    flags.DEFINE_integer('train_steps',         500000,  'Training steps.')
+    flags.DEFINE_integer('save_interval',       100000,  'Checkpoint interval.')
+    flags.DEFINE_integer('log_interval',        1000,    'Log interval.')
+    flags.DEFINE_string ('save_dir',            'exp/gcvf_dual', 'Output dir.')
+    flags.DEFINE_integer('seed',               0,        'Seed.')
+    flags.DEFINE_float  ('p_currgoal',          0.0,     '')
+    flags.DEFINE_float  ('p_trajgoal',          0.625,   '')
+    flags.DEFINE_float  ('p_randomgoal',        0.375,   '')
+    flags.DEFINE_integer('geom_sample',         1,       '')
     app.run(main)

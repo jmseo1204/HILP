@@ -4,7 +4,6 @@ from flax.core import freeze
 import dataclasses
 import numpy as np
 import jax
-import ml_collections
 import jax.numpy as jnp
 
 
@@ -76,7 +75,7 @@ class GCDataset:
 
         batch['rewards'] = success.astype(float) * self.reward_scale + self.reward_shift
         batch['masks'] = (1.0 - success.astype(float))
-        batch['goals'] = jax.tree_map(lambda arr: arr[goal_indx], self.dataset['observations'])
+        batch['goals'] = jax.tree.map(lambda arr: arr[goal_indx], self.dataset['observations'])
 
         if self.p_aug is not None and not evaluation:
             if np.random.rand() < self.p_aug:
@@ -85,7 +84,7 @@ class GCDataset:
                 crop_froms = np.random.randint(0, 2 * padding + 1, (batch_size, 2))
                 crop_froms = np.concatenate([crop_froms, np.zeros((batch_size, 1), dtype=np.int32)], axis=1)
                 for key in aug_keys:
-                    batch[key] = jax.tree_map(lambda arr: np.array(batched_random_crop(arr, crop_froms, padding)) if len(arr.shape) == 4 else arr, batch[key])
+                    batch[key] = jax.tree.map(lambda arr: np.array(batched_random_crop(arr, crop_froms, padding)) if len(arr.shape) == 4 else arr, batch[key])
 
         if isinstance(batch['goals'], FrozenDict):
             # Freeze the other observations

@@ -10,8 +10,6 @@ Key differences from hilp.py:
 
 import copy
 
-import ml_collections
-
 from jaxrl_m.typing import *
 
 from functools import partial

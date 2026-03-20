@@ -35,7 +35,10 @@ import flax
 import flax.jax_utils as flax_utils
 import jax
 import jax.numpy as jnp
-import ml_collections as mlc
+try:
+    import ml_collections as mlc
+except ImportError:
+    mlc = None
 import numpy as np
 
 # import tensorflow.io.gfile as gfile
@@ -580,7 +583,8 @@ def tree_get(tree, name):
         return str(self)
     msg = "\n".join([name, "Available keys:", *flattened, ""])
     # Turn into configdict to use its "did you mean?" error message!
-    msg = mlc.ConfigDict(flattened)._generate_did_you_mean_message(name, msg)  # pylint: disable=protected-access
+    if mlc is not None:
+        msg = mlc.ConfigDict(flattened)._generate_did_you_mean_message(name, msg)  # pylint: disable=protected-access
     raise KeyError(Msg(msg)) from e
 
 
