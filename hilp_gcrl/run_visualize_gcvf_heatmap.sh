@@ -14,7 +14,7 @@ DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 
 # ---- Parameters -------------------------------------------------------------
-ENV_NAME="pointmaze-large-stitch-v0"
+ENV_NAME="antmaze-giant-navigate-v0"
 SKILL_DIM=32
 
 # Phase 2 (GCVF) checkpoint

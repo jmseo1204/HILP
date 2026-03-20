@@ -36,7 +36,7 @@ from train_gcvf_dual_ogbench import GCVFDual
 FLAGS = flags.FLAGS
 flags.DEFINE_enum   ('mode',               'dual_repr', ['dual_repr', 'gcvf'],
                      'dual_repr = psi(s)^T phi(g),  gcvf = V_down(s, phi(g)).')
-flags.DEFINE_string ('env_name',           'pointmaze-large-stitch-v0', 'OGBench env.')
+flags.DEFINE_string ('env_name',           'antmaze-giant-navigate-v0', 'OGBench env.')
 flags.DEFINE_string ('restore_path',       'exp/dual_repr',  'Checkpoint dir (mode-specific).')
 flags.DEFINE_integer('restore_epoch',      1000000,          'Checkpoint step.')
 flags.DEFINE_string ('dual_restore_path',  None,   '[gcvf] DualHILP checkpoint dir.')

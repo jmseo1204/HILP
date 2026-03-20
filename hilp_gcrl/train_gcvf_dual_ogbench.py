@@ -228,7 +228,7 @@ def main(_):
 
 
 if __name__ == '__main__':
-    flags.DEFINE_string ('env_name',            'pointmaze-large-stitch-v0', 'OGBench env.')
+    flags.DEFINE_string ('env_name',            'antmaze-giant-navigate-v0', 'OGBench env.')
     flags.DEFINE_string ('dual_restore_path',   'exp/dual_repr',  'Phase-1 checkpoint dir.')
     flags.DEFINE_integer('dual_restore_epoch',  1000000,          'Phase-1 checkpoint step.')
     flags.DEFINE_float  ('lr',                  3e-4,    'Learning rate.')

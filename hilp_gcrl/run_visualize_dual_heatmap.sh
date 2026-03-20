@@ -13,12 +13,12 @@ DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 
 # ---- Parameters -------------------------------------------------------------
-ENV_NAME="pointmaze-large-stitch-v0"
+ENV_NAME="antmaze-giant-navigate-v0"
 SKILL_DIM=32
 
 # Phase 1 checkpoint
 RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
-RESTORE_EPOCH=1000000
+RESTORE_EPOCH=500000
 
 # Goal position (x, y) — adjust for your environment
 GOAL_X=12.0

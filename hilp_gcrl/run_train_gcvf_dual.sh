@@ -13,14 +13,14 @@ DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 
 # ---- Parameters (must match Phase 1 settings) -------------------------------
-ENV_NAME="pointmaze-large-stitch-v0"
+ENV_NAME="antmaze-giant-navigate-v0"
 SKILL_DIM=32
 TRAIN_STEPS=500000
-BATCH_SIZE=1024
+BATCH_SIZE=4096
 LR=3e-4
 DISCOUNT=0.99
 EXPECTILE=0.95
-SAVE_INTERVAL=100000
+SAVE_INTERVAL=50000
 
 # Phase 1 checkpoint to load (frozen)
 DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"

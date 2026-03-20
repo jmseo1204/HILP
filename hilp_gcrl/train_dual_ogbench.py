@@ -251,7 +251,7 @@ def main(_):
 
 
 if __name__ == '__main__':
-    flags.DEFINE_string ('env_name',       'pointmaze-large-stitch-v0', 'OGBench env.')
+    flags.DEFINE_string ('env_name',       'antmaze-giant-navigate-v0', 'OGBench env.')
     flags.DEFINE_float  ('lr',             3e-4,    'Learning rate.')
     flags.DEFINE_integer('skill_dim',      32,      'Dimension of psi/phi.')
     flags.DEFINE_multi_integer('value_hidden_dims', [512, 512, 512], 'MLP hidden dims.')
