@@ -34,7 +34,7 @@ echo "============================================"
 
 docker run --gpus all --rm \
     -v "${WORKSPACE_ROOT}:/workspace" \
-    -v "${OGBENCH_DATA_DIR}:/home/jmseo1204/.ogbench/data" \
+    -v "${OGBENCH_DATA_DIR}:/home/junjolp2026spring/.ogbench/data" \
     -w /workspace/HILP/hilp_gcrl \
     -e MUJOCO_GL=egl \
     -e XLA_PYTHON_CLIENT_PREALLOCATE=false \
