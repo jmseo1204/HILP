@@ -12,6 +12,8 @@ set -e
 WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
+UNAME="jmseo1204"
+DEVICE="device=0"
 
 # ---- Parameters -------------------------------------------------------------
 ENV_NAME="antmaze-giant-navigate-v0"
@@ -42,9 +44,9 @@ echo "  goal              : (${GOAL_X}, ${GOAL_Y})"
 echo "  output dir        : ${SAVE_DIR}"
 echo "============================================"
 
-docker run --gpus '"device=0,1"' --rm \
+docker run --gpus "${DEVICE}" --rm \
     -v "${WORKSPACE_ROOT}:/workspace" \
-    -v "${OGBENCH_DATA_DIR}:/home/junjolp2026spring/.ogbench/data" \
+    -v "${OGBENCH_DATA_DIR}:/home/${UNAME}/.ogbench/data" \
     -w /workspace/HILP/hilp_gcrl \
     -e MUJOCO_GL=egl \
     -e XLA_PYTHON_CLIENT_PREALLOCATE=false \
