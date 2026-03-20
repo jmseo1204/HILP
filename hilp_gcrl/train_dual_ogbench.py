@@ -4,6 +4,11 @@ Train Dual Goal Representations on OGBench environments.
 Phase 1 of arXiv:2510.06714:
   V(s, g) = psi(s)^T phi(g)  (inner product, separate state/goal encoders)
 
+Follows Algorithm 1 with separate Q network:
+  L(psi, phi) = E[ l2_kappa( V(s,g) - Q_bar(s,a,g) ) ]
+  L(Q)        = E[ (Q(s,a,g) - r(s,g) - gamma * V(s',g))^2 ]
+  Q_bar       <- EMA of Q
+
 All dependencies are inside hilp_gcrl/.
 """
 
@@ -14,7 +19,6 @@ import sys
 import glob
 import pickle
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import jax
@@ -34,7 +38,7 @@ sys.path.insert(0, str(_ROOT))
 from jaxrl_m.common import TrainState, shard_batch
 from jaxrl_m.dataset import Dataset
 from src.dataset_utils import GCDataset
-from src.special_networks import DualGoalPhiValue
+from src.special_networks import DualGoalPhiValue, GoalConditionedCritic
 from src.agents.hilp import expectile_loss
 # -----------------------------------------------------------------------------
 
@@ -68,14 +72,24 @@ def restore_agent(agent, restore_path, restore_epoch):
 # ======================== Network ============================================
 
 class DualValueNetwork(nn.Module):
-    """Wraps DualGoalPhiValue (value + target_value) for use with TrainState."""
+    """
+    Network container for dual goal representation learning (Algorithm 1).
+
+    Contains:
+      value:    V(s,g) = psi(s)^T phi(g)   (inner-product, ensemble)
+      q_func:   Q(s,a,g) = MLP([s,g,a])    (separate Q network, ensemble)
+      target_q: Q_bar = EMA of q_func       (target Q network)
+    """
     networks: dict
 
     def value(self, observations, goals=None, **kwargs):
         return self.networks['value'](observations, goals, **kwargs)
 
-    def target_value(self, observations, goals=None, **kwargs):
-        return self.networks['target_value'](observations, goals, **kwargs)
+    def q_func(self, observations, goals=None, actions=None, **kwargs):
+        return self.networks['q_func'](observations, goals, actions, **kwargs)
+
+    def target_q(self, observations, goals=None, actions=None, **kwargs):
+        return self.networks['target_q'](observations, goals, actions, **kwargs)
 
     def phi(self, observations, **kwargs):
         """psi(s): state representation."""
@@ -85,11 +99,12 @@ class DualValueNetwork(nn.Module):
         """phi(g): dual goal representation."""
         return self.networks['value'].get_phi(goals)
 
-    def __call__(self, observations, goals):
+    def __call__(self, observations, goals, actions):
         # Only used for parameter initialization
         return {
-            'value':        self.value(observations, goals),
-            'target_value': self.target_value(observations, goals),
+            'value':    self.value(observations, goals),
+            'q_func':   self.q_func(observations, goals, actions),
+            'target_q': self.target_q(observations, goals, actions),
         }
 
 
@@ -99,55 +114,77 @@ class DualHILP(flax.struct.PyTreeNode):
     network: TrainState
     config:  dict = flax.struct.field(pytree_node=False)
 
-    def value_loss(self, batch, network_params):
-        # batch['rewards'] = success - 1  (0 or -1)
-        # batch['masks']   = 1 - success  (1 or 0)
-        (nv1, nv2) = self.network(
-            batch['next_observations'], batch['goals'], method='target_value')
-        next_v = jnp.minimum(nv1, nv2)
-        q = batch['rewards'] + self.config['discount'] * batch['masks'] * next_v
+    def total_loss(self, batch, network_params):
+        """
+        Algorithm 1 losses:
+          L(psi, phi) = E[ l2_kappa( V(s,g) - Q_bar(s,a,g) ) ]   (Eq. 3)
+          L(Q)        = E[ (Q(s,a,g) - r - gamma * V(s',g))^2 ]   (Eq. 4)
+        """
+        # ---- V loss (Eq. 3): fit V to target Q_bar ----
+        # Q_bar(s, a, g) from target Q (stop gradient — uses stored params)
+        (tq1, tq2) = self.network(
+            batch['observations'], batch['goals'], batch['actions'],
+            method='target_q')
+        q_bar = jnp.minimum(tq1, tq2)   # pessimistic
 
-        (v1_t, v2_t) = self.network(
-            batch['observations'], batch['goals'], method='target_value')
-        adv = q - (v1_t + v2_t) / 2
-
-        q1 = batch['rewards'] + self.config['discount'] * batch['masks'] * nv1
-        q2 = batch['rewards'] + self.config['discount'] * batch['masks'] * nv2
+        # V(s, g) = psi(s)^T phi(g) — gradient flows through psi, phi
         (v1, v2) = self.network(
             batch['observations'], batch['goals'],
             method='value', params=network_params)
         v = (v1 + v2) / 2
 
-        loss = (expectile_loss(adv, q1 - v1, self.config['expectile']).mean() +
-                expectile_loss(adv, q2 - v2, self.config['expectile']).mean())
-        return loss, {
-            'value_loss':  loss,
-            'v_mean':      v.mean(),
-            'v_max':       v.max(),
-            'v_min':       v.min(),
-            'adv_mean':    adv.mean(),
-            'accept_prob': (adv >= 0).mean(),
-        }
+        # Advantage for expectile weighting
+        # (q_bar uses stored target params → effectively stop_gradient)
+        adv = q_bar - v
 
-    def total_loss(self, batch, grad_params):
-        loss, info = self.value_loss(batch, grad_params)
-        log = {f'value/{k}': v for k, v in info.items()}
-        log['loss'] = loss
-        return loss, log
+        # Expectile loss: push V toward the upper quantile of Q_bar
+        loss_v = (expectile_loss(adv, q_bar - v1, self.config['expectile']).mean() +
+                  expectile_loss(adv, q_bar - v2, self.config['expectile']).mean())
+
+        # ---- Q loss (Eq. 4): fit Q to r + gamma * V(s') ----
+        # V(s', g) from current V (stop gradient — uses stored params, not network_params)
+        (nv1, nv2) = self.network(
+            batch['next_observations'], batch['goals'],
+            method='value')
+        next_v = jnp.minimum(nv1, nv2)
+        target_q_val = batch['rewards'] + self.config['discount'] * batch['masks'] * next_v
+
+        # Q(s, a, g) — gradient flows through Q
+        (q1, q2) = self.network(
+            batch['observations'], batch['goals'], batch['actions'],
+            method='q_func', params=network_params)
+        loss_q = ((q1 - target_q_val)**2 + (q2 - target_q_val)**2).mean()
+
+        loss = loss_v + loss_q
+
+        info = {
+            'value/value_loss': loss_v,
+            'value/q_loss':     loss_q,
+            'value/v_mean':     v.mean(),
+            'value/v_max':      v.max(),
+            'value/v_min':      v.min(),
+            'value/adv_mean':   adv.mean(),
+            'value/accept_prob': (adv >= 0).mean(),
+            'value/q_bar_mean': q_bar.mean(),
+            'value/q_bar_max':  q_bar.max(),
+            'value/q_bar_min':  q_bar.min(),
+            'loss':             loss,
+        }
+        return loss, info
 
     def update(self, batch, pmap_axis=None):
         new_network, info = self.network.apply_loss_fn(
             loss_fn=lambda p: self.total_loss(batch, p), has_aux=True,
             pmap_axis=pmap_axis)
 
-        # EMA target update
-        new_tp = jax.tree.map(
+        # EMA target update: Q_bar <- tau * Q + (1 - tau) * Q_bar
+        new_tq = jax.tree.map(
             lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
-            new_network.params['networks_value'],
-            new_network.params['networks_target_value'],
+            new_network.params['networks_q_func'],
+            new_network.params['networks_target_q'],
         )
         params = dict(new_network.params)
-        params['networks_target_value'] = new_tp
+        params['networks_target_q'] = new_tq
         new_network = new_network.replace(params=params)
 
         return self.replace(network=new_network), info
@@ -168,31 +205,48 @@ class DualHILP(flax.struct.PyTreeNode):
         return self.get_psi(observations)
 
     @classmethod
-    def create(cls, seed, ex_observations, lr=3e-4,
+    def create(cls, seed, ex_observations, ex_actions, lr=3e-4,
                value_hidden_dims=(512, 512, 512), discount=0.99, tau=0.005,
-               expectile=0.95, use_layer_norm=1, skill_dim=32, **kwargs):
+               expectile=0.95, use_layer_norm=1, skill_dim=32,
+               grad_clip_norm=1.0, **kwargs):
         print('DualHILP.create — extra kwargs:', kwargs)
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
 
+        # V(s,g) = psi(s)^T phi(g)
         value_def = DualGoalPhiValue(
             hidden_dims=tuple(value_hidden_dims),
             skill_dim=skill_dim,
             use_layer_norm=bool(use_layer_norm),
             ensemble=True,
         )
+
+        # Q(s,a,g) = MLP([s, g, a]) — separate Q network (Algorithm 1)
+        q_def = GoalConditionedCritic(
+            hidden_dims=tuple(value_hidden_dims),
+            use_layer_norm=bool(use_layer_norm),
+            ensemble=True,
+        )
+
         network_def = DualValueNetwork(networks={
-            'value':        value_def,
-            'target_value': copy.deepcopy(value_def),
+            'value':    value_def,
+            'q_func':   q_def,
+            'target_q': copy.deepcopy(q_def),
         })
-        network_tx     = optax.adam(learning_rate=lr)
+
+        # Gradient clipping + Adam
+        network_tx = optax.chain(
+            optax.clip_by_global_norm(grad_clip_norm),
+            optax.adam(learning_rate=lr),
+        )
+
         network_params = unfreeze(network_def.init(
-            init_rng, ex_observations, ex_observations)['params'])
+            init_rng, ex_observations, ex_observations, ex_actions)['params'])
         network = TrainState.create(network_def, network_params, tx=network_tx)
 
-        # Initialize target = value (plain dict — keeps optimizer state consistent)
+        # Initialize target_q = q_func
         params = dict(network.params)
-        params['networks_target_value'] = params['networks_value']
+        params['networks_target_q'] = params['networks_q_func']
         network = network.replace(params=params)
 
         return cls(network=network,
@@ -244,9 +298,11 @@ def main(_):
     )
 
     ex_obs = train_data['observations'][:1]
+    ex_act = train_data['actions'][:1]
     agent  = DualHILP.create(
         seed              = FLAGS.seed,
         ex_observations   = ex_obs,
+        ex_actions        = ex_act,
         lr                = FLAGS.lr,
         value_hidden_dims = tuple(FLAGS.value_hidden_dims),
         discount          = FLAGS.discount,
@@ -254,6 +310,7 @@ def main(_):
         expectile         = FLAGS.expectile,
         use_layer_norm    = FLAGS.use_layer_norm,
         skill_dim         = FLAGS.skill_dim,
+        grad_clip_norm    = FLAGS.grad_clip_norm,
     )
 
     # ---- Build train_step (pmap for multi-GPU, jit for single GPU) ----------
@@ -315,6 +372,7 @@ if __name__ == '__main__':
     flags.DEFINE_float  ('p_trajgoal',     0.625,   '')
     flags.DEFINE_float  ('p_randomgoal',   0.375,   '')
     flags.DEFINE_integer('geom_sample',    1,       '')
+    flags.DEFINE_float  ('grad_clip_norm', 1.0,     'Max gradient global norm.')
     flags.DEFINE_string ('wandb_project',  '',      'WandB project name. Empty = disabled.')
     flags.DEFINE_string ('wandb_run_name', '',      'WandB run name. Empty = auto.')
     app.run(main)

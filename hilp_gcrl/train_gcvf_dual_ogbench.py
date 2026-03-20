@@ -207,8 +207,9 @@ def main(_):
     ex_obs = train_data['observations'][:1]
 
     # ---- Restore frozen Phase-1 dual agent ----------------------------------
+    ex_act = train_data['actions'][:1]
     dual_agent = DualHILP.create(
-        seed=FLAGS.seed, ex_observations=ex_obs,
+        seed=FLAGS.seed, ex_observations=ex_obs, ex_actions=ex_act,
         value_hidden_dims=tuple(FLAGS.value_hidden_dims),
         discount=FLAGS.discount, tau=FLAGS.tau,
         expectile=FLAGS.expectile, use_layer_norm=FLAGS.use_layer_norm,
@@ -281,7 +282,7 @@ if __name__ == '__main__':
     flags.DEFINE_integer('skill_dim',           32,      'Must match Phase-1 skill_dim.')
     flags.DEFINE_float  ('discount',            0.99,    'Discount.')
     flags.DEFINE_float  ('tau',                 0.005,   'Target EMA rate.')
-    flags.DEFINE_float  ('expectile',           0.95,    'Expectile.')
+    flags.DEFINE_float  ('expectile',           0.9,     'Downstream GCIVL expectile (paper Table 9).')
     flags.DEFINE_integer('use_layer_norm',      1,       '1 = LayerNorm.')
     flags.DEFINE_integer('batch_size',          1024,    'Batch size.')
     flags.DEFINE_integer('train_steps',         500000,  'Training steps.')
@@ -289,9 +290,9 @@ if __name__ == '__main__':
     flags.DEFINE_integer('log_interval',        1000,    'Log interval.')
     flags.DEFINE_string ('save_dir',            'exp/gcvf_dual', 'Output dir.')
     flags.DEFINE_integer('seed',               0,        'Seed.')
-    flags.DEFINE_float  ('p_currgoal',          0.0,     '')
-    flags.DEFINE_float  ('p_trajgoal',          0.625,   '')
-    flags.DEFINE_float  ('p_randomgoal',        0.375,   '')
+    flags.DEFINE_float  ('p_currgoal',          0.2,     'Paper Table 9: downstream value ratio.')
+    flags.DEFINE_float  ('p_trajgoal',          0.5,     'Paper Table 9: downstream value ratio.')
+    flags.DEFINE_float  ('p_randomgoal',        0.3,     'Paper Table 9: downstream value ratio.')
     flags.DEFINE_integer('geom_sample',         1,       '')
     flags.DEFINE_string ('wandb_project',       '',      'WandB project name. Empty = disabled.')
     flags.DEFINE_string ('wandb_run_name',      '',      'WandB run name. Empty = auto.')

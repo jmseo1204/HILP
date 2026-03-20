@@ -12,16 +12,19 @@ WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 UNAME="jmseo1204"
-DEVICE="device=0"
+DEVICE='"device=0"'
 
 # ---- Parameters (must match Phase 1 settings) -------------------------------
 ENV_NAME="antmaze-giant-navigate-v0"
 SKILL_DIM=256
 TRAIN_STEPS=500000
-BATCH_SIZE=2048
+BATCH_SIZE=1024
 LR=3e-4
-DISCOUNT=0.99
-EXPECTILE=0.95
+DISCOUNT=0.995
+EXPECTILE=0.9
+P_CURRGOAL=0.2
+P_TRAJGOAL=0.5
+P_RANDOMGOAL=0.3
 SAVE_INTERVAL=50000
 
 # Phase 1 checkpoint to load (frozen)
@@ -65,6 +68,9 @@ docker run --gpus "${DEVICE}" --rm \
             --discount=${DISCOUNT} \
             --expectile=${EXPECTILE} \
             --save_interval=${SAVE_INTERVAL} \
+            --p_currgoal=${P_CURRGOAL} \
+            --p_trajgoal=${P_TRAJGOAL} \
+            --p_randomgoal=${P_RANDOMGOAL} \
             --save_dir=${SAVE_DIR} \
             --wandb_project=${WANDB_PROJECT} \
             --wandb_run_name=${WANDB_RUN_NAME}
