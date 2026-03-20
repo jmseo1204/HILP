@@ -8,6 +8,7 @@ All dependencies are inside hilp_gcrl/.
 """
 
 import copy
+import functools
 import os
 import sys
 import glob
@@ -24,12 +25,13 @@ import optax
 from flax.core import unfreeze
 from absl import app, flags
 import tqdm
+import wandb
 
 # ---- hilp_gcrl internal imports ---------------------------------------------
 _ROOT = Path(__file__).parent          # hilp_gcrl/
 sys.path.insert(0, str(_ROOT))
 
-from jaxrl_m.common import TrainState
+from jaxrl_m.common import TrainState, shard_batch
 from jaxrl_m.dataset import Dataset
 from src.dataset_utils import GCDataset
 from src.special_networks import DualGoalPhiValue
@@ -47,6 +49,11 @@ def save_agent(agent, save_dir, step):
     with open(path, 'wb') as f:
         pickle.dump({'agent': flax.serialization.to_state_dict(agent)}, f)
     print(f'Saved → {path}')
+    # Remove previous checkpoints, keeping only the latest
+    for old in glob.glob(os.path.join(save_dir, 'params_*.pkl')):
+        if old != path:
+            os.remove(old)
+            print(f'Removed → {old}')
 
 
 def restore_agent(agent, restore_path, restore_epoch):
@@ -122,15 +129,14 @@ class DualHILP(flax.struct.PyTreeNode):
             'accept_prob': (adv >= 0).mean(),
         }
 
-    @jax.jit
     def total_loss(self, batch, grad_params):
         loss, info = self.value_loss(batch, grad_params)
         return loss, {f'value/{k}': v for k, v in info.items()}
 
-    @jax.jit
-    def update(self, batch):
+    def update(self, batch, pmap_axis=None):
         new_network, info = self.network.apply_loss_fn(
-            loss_fn=lambda p: self.total_loss(batch, p), has_aux=True)
+            loss_fn=lambda p: self.total_loss(batch, p), has_aux=True,
+            pmap_axis=pmap_axis)
 
         # EMA target update
         new_tp = jax.tree.map(
@@ -198,7 +204,20 @@ class DualHILP(flax.struct.PyTreeNode):
 def main(_):
     import ogbench
     os.makedirs(FLAGS.save_dir, exist_ok=True)
+
+    # ---- Multi-GPU setup ----------------------------------------------------
+    n_devices = jax.local_device_count()
     print(f'[DualHILP] env={FLAGS.env_name}  save_dir={FLAGS.save_dir}')
+    print(f'[DualHILP] Using {n_devices} GPU(s): {jax.local_devices()}')
+    assert FLAGS.batch_size % n_devices == 0, (
+        f'batch_size ({FLAGS.batch_size}) must be divisible by n_devices ({n_devices})')
+
+    # ---- WandB --------------------------------------------------------------
+    if FLAGS.wandb_project:
+        run_name = FLAGS.wandb_run_name or f'dual_repr_{FLAGS.env_name}'
+        wandb.init(project=FLAGS.wandb_project, name=run_name,
+                   config=FLAGS.flag_values_dict())
+        print(f'[DualHILP] WandB run: {run_name}  project: {FLAGS.wandb_project}')
 
     _, dataset, _ = ogbench.make_env_and_datasets(
         FLAGS.env_name, compact_dataset=False)
@@ -235,19 +254,44 @@ def main(_):
         skill_dim         = FLAGS.skill_dim,
     )
 
+    # ---- Build train_step (pmap for multi-GPU, jit for single GPU) ----------
+    if n_devices > 1:
+        agent = jax.device_put_replicated(agent, jax.local_devices())
+
+        @functools.partial(jax.pmap, axis_name='batch')
+        def train_step(agent, batch):
+            return agent.update(batch, pmap_axis='batch')
+    else:
+        @jax.jit
+        def train_step(agent, batch):
+            return agent.update(batch)
+
+    # ---- Training loop ------------------------------------------------------
     for step in tqdm.tqdm(range(1, FLAGS.train_steps + 1),
                           smoothing=0.1, dynamic_ncols=True):
         batch = gc_dataset.sample(FLAGS.batch_size)
-        agent, info = agent.update(batch)
+        if n_devices > 1:
+            batch = shard_batch(batch)
+        agent, info = train_step(agent, batch)
 
         if step % FLAGS.log_interval == 0:
-            log_str = '  '.join(f'{k}={float(v):.4f}' for k, v in info.items())
+            if n_devices > 1:
+                log_info = {k: float(v[0]) for k, v in info.items()}
+            else:
+                log_info = {k: float(v) for k, v in info.items()}
+            log_str = '  '.join(f'{k}={v:.4f}' for k, v in log_info.items())
             tqdm.tqdm.write(f'[step {step:>8d}] {log_str}')
+            if FLAGS.wandb_project:
+                wandb.log(log_info, step=step)
 
         if step % FLAGS.save_interval == 0:
-            save_agent(agent, FLAGS.save_dir, step)
+            save_agent(
+                jax.tree.map(lambda x: x[0], agent) if n_devices > 1 else agent,
+                FLAGS.save_dir, step)
 
     print('[DualHILP] Training complete.')
+    if FLAGS.wandb_project:
+        wandb.finish()
 
 
 if __name__ == '__main__':
@@ -269,4 +313,6 @@ if __name__ == '__main__':
     flags.DEFINE_float  ('p_trajgoal',     0.625,   '')
     flags.DEFINE_float  ('p_randomgoal',   0.375,   '')
     flags.DEFINE_integer('geom_sample',    1,       '')
+    flags.DEFINE_string ('wandb_project',  '',      'WandB project name. Empty = disabled.')
+    flags.DEFINE_string ('wandb_run_name', '',      'WandB run name. Empty = auto.')
     app.run(main)

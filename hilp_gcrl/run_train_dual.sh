@@ -13,14 +13,21 @@ OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 
 # ---- Parameters (edit here to change runs) ----------------------------------
 ENV_NAME="antmaze-giant-navigate-v0"
-SKILL_DIM=32
-TRAIN_STEPS=500000
-BATCH_SIZE=4096
+SKILL_DIM=256
+TRAIN_STEPS=1000000
+BATCH_SIZE=2048
 LR=3e-4
-DISCOUNT=0.99
-EXPECTILE=0.95
+DISCOUNT=0.995
+EXPECTILE=0.9
+P_CURRGOAL=0.2
+P_TRAJGOAL=0.5
+P_RANDOMGOAL=0.3
 SAVE_INTERVAL=50000
 SAVE_DIR="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
+
+# ---- WandB (set WANDB_API_KEY in your shell, or leave WANDB_PROJECT empty to disable) --
+WANDB_PROJECT="${WANDB_PROJECT:-hilp_gcrl}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-dual_repr_${ENV_NAME}}"
 
 PYTHON_SCRIPT="/workspace/HILP/hilp_gcrl/train_dual_ogbench.py"
 
@@ -38,6 +45,7 @@ docker run --gpus all --rm \
     -w /workspace/HILP/hilp_gcrl \
     -e MUJOCO_GL=egl \
     -e XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
     "${DOCKER_IMAGE}" bash -c "
         pip3 install --quiet pyrallis shapely scikit-learn ogbench distrax &&
         python3 ${PYTHON_SCRIPT} \
@@ -48,8 +56,13 @@ docker run --gpus all --rm \
             --lr=${LR} \
             --discount=${DISCOUNT} \
             --expectile=${EXPECTILE} \
+            --p_currgoal=${P_CURRGOAL} \
+            --p_trajgoal=${P_TRAJGOAL} \
+            --p_randomgoal=${P_RANDOMGOAL} \
             --save_interval=${SAVE_INTERVAL} \
-            --save_dir=${SAVE_DIR}
+            --save_dir=${SAVE_DIR} \
+            --wandb_project=${WANDB_PROJECT} \
+            --wandb_run_name=${WANDB_RUN_NAME}
     "
 
 echo ""
