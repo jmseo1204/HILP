@@ -109,6 +109,8 @@ def evaluate_with_trajectories(
 ) -> Dict[str, float]:
     policy_fn = supply_rng(agent.sample_skill_actions)
 
+    is_dual = hasattr(agent, 'get_phi_goal')
+
     if policy_type == 'goal_skill_planning':
         planning_info['examples']['phis'] = np.array(agent.get_phi(planning_info['examples']['observations']))
 
@@ -130,20 +132,33 @@ def evaluate_with_trajectories(
             policy_goal = obs_goal
 
             if policy_type == 'goal_skill':
-                phi_obs, phi_goal = agent.get_phi(np.array([policy_obs, policy_goal]))
-                skill = (phi_goal - phi_obs) / np.linalg.norm(phi_goal - phi_obs)
+                if is_dual:
+                    # Dual agent: skill = phi(g) / ||phi(g)||
+                    phi_goal = np.array(agent.get_phi_goal(np.array([policy_goal])))[0]
+                    skill = phi_goal / np.linalg.norm(phi_goal)
+                else:
+                    phi_obs, phi_goal = agent.get_phi(np.array([policy_obs, policy_goal]))
+                    skill = (phi_goal - phi_obs) / np.linalg.norm(phi_goal - phi_obs)
                 action = policy_fn(observations=policy_obs, skills=skill, temperature=0.)
             elif policy_type == 'goal_skill_planning':
-                phi_obs, phi_goal = agent.get_phi(np.array([policy_obs, policy_goal]))
+                psi_obs = np.array(agent.get_phi(np.array([policy_obs])))[0]
+                if is_dual:
+                    phi_goal_vec = np.array(agent.get_phi_goal(np.array([policy_goal])))[0]
+                else:
+                    phi_goal_vec = np.array(agent.get_phi(np.array([policy_goal])))[0]
 
                 for k in range(planning_info['num_recursions']):
                     ex_phis = planning_info['examples']['phis']
-                    dists_s = np.linalg.norm(ex_phis - phi_obs, axis=-1)
-                    dists_g = np.linalg.norm(ex_phis - phi_goal, axis=-1)
+                    dists_s = np.linalg.norm(ex_phis - psi_obs, axis=-1)
+                    dists_g = np.linalg.norm(ex_phis - phi_goal_vec, axis=-1)
                     dists_diff = np.maximum(dists_s, dists_g)
                     way_idxs = dists_diff.argsort()
-                    phi_goal = ex_phis[way_idxs[:planning_info['num_knns']]].mean(axis=0)
-                way_skill = (phi_goal - phi_obs) / np.linalg.norm(phi_goal - phi_obs)
+                    phi_goal_vec = ex_phis[way_idxs[:planning_info['num_knns']]].mean(axis=0)
+
+                if is_dual:
+                    way_skill = phi_goal_vec / np.linalg.norm(phi_goal_vec)
+                else:
+                    way_skill = (phi_goal_vec - psi_obs) / np.linalg.norm(phi_goal_vec - psi_obs)
                 action = policy_fn(observations=policy_obs, skills=way_skill, temperature=0.)
             else:
                 raise NotImplementedError

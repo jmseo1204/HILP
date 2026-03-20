@@ -21,7 +21,6 @@ import flax
 import tqdm
 
 from src import d4rl_utils, d4rl_ant, ant_diagnostics, viz_utils
-from src.agents import hilp as learner
 from src.dataset_utils import GCDataset
 
 from jaxrl_m.wandb import setup_wandb, default_wandb_config
@@ -78,6 +77,14 @@ flags.DEFINE_float('p_aug', None, '')
 flags.DEFINE_string('algo_name', None, '')  # Not used, only for logging
 
 config_flags.DEFINE_config_dict('wandb', default_wandb_config(), lock_config=False)
+
+
+def get_learner_module():
+    if FLAGS.agent_name == 'hilp_dual':
+        from src.agents import hilp_dual as learner
+    else:
+        from src.agents import hilp as learner
+    return learner
 
 
 @jax.jit
@@ -204,6 +211,8 @@ def main(_):
         p_currgoal=FLAGS.p_currgoal, p_trajgoal=FLAGS.p_trajgoal, p_randomgoal=FLAGS.p_randomgoal,
         discount=FLAGS.discount, p_aug=FLAGS.p_aug,
     )
+
+    learner = get_learner_module()
 
     total_steps = FLAGS.train_steps
     example_batch = dataset.sample(1)

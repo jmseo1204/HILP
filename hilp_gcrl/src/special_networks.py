@@ -121,6 +121,39 @@ class GoalConditionedCritic(nn.Module):
         return q
 
 
+class DualGoalPhiValue(nn.Module):
+    """
+    Dual Goal Representation value function (arXiv:2510.06714).
+    V(s, g) = psi(s)^T phi(g)
+      psi: state encoder (s -> R^skill_dim)
+      phi: goal encoder  (g -> R^skill_dim), the 'dual' representation
+    """
+    hidden_dims: tuple = (256, 256)
+    skill_dim: int = 32
+    use_layer_norm: bool = True
+    ensemble: bool = True
+    encoder: nn.Module = None
+
+    def setup(self):
+        repr_class = LayerNormRepresentation if self.use_layer_norm else Representation
+        self.psi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=self.ensemble)
+        self.phi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=self.ensemble)
+
+    def get_phi(self, goals):
+        """phi(g): dual goal representation."""
+        return self.phi(goals)[0]  # (B, D) — first ensemble member
+
+    def get_psi(self, observations):
+        """psi(s): state representation."""
+        return self.psi(observations)[0]  # (B, D) — first ensemble member
+
+    def __call__(self, observations, goals=None):
+        psi_s = self.psi(observations)   # (2, B, D)
+        phi_g = self.phi(goals)          # (2, B, D)
+        v = (psi_s * phi_g).sum(axis=-1) # (2, B)
+        return v
+
+
 def get_rep(
         encoder: nn.Module, targets: jnp.ndarray, bases: jnp.ndarray = None,
 ):
@@ -153,6 +186,71 @@ class HILPNetwork(nn.Module):
 
     def phi(self, observations, **kwargs):
         return self.networks['value'].get_phi(observations, **kwargs)
+
+    def skill_value(self, observations, skills, **kwargs):
+        skills = self.unsqueeze_context(observations, skills)
+        return self.networks['skill_value'](observations, skills, **kwargs)
+
+    def skill_target_value(self, observations, skills, **kwargs):
+        skills = self.unsqueeze_context(observations, skills)
+        return self.networks['skill_target_value'](observations, skills, **kwargs)
+
+    def skill_critic(self, observations, skills, actions=None, **kwargs):
+        skills = self.unsqueeze_context(observations, skills)
+        actions = self.unsqueeze_context(observations, actions)
+        return self.networks['skill_critic'](observations, skills, actions, **kwargs)
+
+    def skill_target_critic(self, observations, skills, actions=None, **kwargs):
+        skills = self.unsqueeze_context(observations, skills)
+        actions = self.unsqueeze_context(observations, actions)
+        return self.networks['skill_target_critic'](observations, skills, actions, **kwargs)
+
+    def skill_actor(self, observations, skills, **kwargs):
+        skills = self.unsqueeze_context(observations, skills)
+        return self.networks['skill_actor'](jnp.concatenate([observations, skills], axis=-1), **kwargs)
+
+    def __call__(self, observations, goals, actions, skills):
+        # Only for initialization
+        rets = {
+            'value': self.value(observations, goals),
+            'target_value': self.target_value(observations, goals),
+            'skill_actor': self.skill_actor(observations, skills),
+            'skill_value': self.skill_value(observations, skills),
+            'skill_critic': self.skill_critic(observations, skills, actions),
+            'skill_target_critic': self.skill_target_critic(observations, skills, actions),
+        }
+        return rets
+
+
+class HILPDualNetwork(nn.Module):
+    """
+    Network container for HILP with Dual Goal Representations.
+    Uses DualGoalPhiValue: V(s,g) = psi(s)^T phi(g).
+    phi() returns psi(s) — state repr used for skill rewards.
+    phi_goal() returns phi(g) — dual goal repr used for skill direction at eval.
+    """
+    networks: Dict[str, nn.Module]
+
+    def unsqueeze_context(self, observations, contexts):
+        if len(observations.shape) <= 2:
+            return contexts
+        else:
+            assert len(observations.shape) == len(contexts.shape) + 2
+            return jnp.expand_dims(jnp.expand_dims(contexts, axis=-2), axis=-2).repeat(observations.shape[-3], axis=-3).repeat(observations.shape[-2], axis=-2)
+
+    def value(self, observations, goals=None, **kwargs):
+        return self.networks['value'](observations, goals, **kwargs)
+
+    def target_value(self, observations, goals=None, **kwargs):
+        return self.networks['target_value'](observations, goals, **kwargs)
+
+    def phi(self, observations, **kwargs):
+        """psi(s): state representation, used for skill reward = Delta_psi · z."""
+        return self.networks['value'].get_psi(observations, **kwargs)
+
+    def phi_goal(self, goals, **kwargs):
+        """phi(g): dual goal representation, used as skill direction at eval."""
+        return self.networks['value'].get_phi(goals, **kwargs)
 
     def skill_value(self, observations, skills, **kwargs):
         skills = self.unsqueeze_context(observations, skills)
