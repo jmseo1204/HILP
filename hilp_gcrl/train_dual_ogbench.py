@@ -561,7 +561,15 @@ def main(_):
         return batch, active
 
     # ---- Training loop ------------------------------------------------------
-    neg_sample_count = 0  # log_interval 동안 active된 횟수
+    # 모든 지표를 interval mean으로 로깅
+    # neg 지표 중 per-step 의미 없는 것들은 active step만 별도 누적
+    _NEG_STEP_KEYS = {'neg/active', 'neg/loss_raw', 'neg/loss_weighted',
+                      'neg/v_neg_mean', 'neg/v_neg_max'}
+    neg_sample_count = 0
+    info_acc    = {}   # 일반 지표: 전체 step 누적
+    neg_acc     = {}   # neg 지표: active step만 누적
+    _extract    = (lambda v: float(v[0])) if n_devices > 1 else float
+
     for step in tqdm.tqdm(range(start_step, FLAGS.train_steps + 1),
                           smoothing=0.1, dynamic_ncols=True):
         batch = gc_dataset.sample(FLAGS.batch_size)
@@ -571,19 +579,36 @@ def main(_):
             batch = shard_batch(batch)
         agent, info = train_step(agent, batch)
 
+        # 일반 지표 누적 (neg per-step 제외)
+        for k, v in info.items():
+            if k not in _NEG_STEP_KEYS:
+                info_acc.setdefault(k, []).append(_extract(v))
+
+        # neg 지표는 active step일 때만 누적
+        if is_active:
+            for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_neg_max'):
+                neg_acc.setdefault(k, []).append(_extract(info[k]))
+
         if step % FLAGS.log_interval == 0:
-            if n_devices > 1:
-                log_info = {k: float(v[0]) for k, v in info.items()}
-            else:
-                log_info = {k: float(v) for k, v in info.items()}
+            log_info = {k: float(np.mean(vs)) for k, vs in info_acc.items()}
+
             log_info['neg/sample_count']    = neg_sample_count
             log_info['neg/sample_rate']     = neg_sample_count / FLAGS.log_interval
             log_info['neg/prohibited_size'] = prohibited_obs.shape[0] if prohibited_obs is not None else 0
-            log_str = '  '.join(f'{k}={v:.4f}' for k, v in log_info.items())
+            for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_neg_max'):
+                log_info[k + '_avg'] = float(np.mean(neg_acc[k])) if neg_acc.get(k) else float('nan')
+
+            log_str = '  '.join(
+                f'{k}={v:.4f}' for k, v in log_info.items()
+                if not (isinstance(v, float) and np.isnan(v))
+            )
             tqdm.tqdm.write(f'[step {step:>8d}] {log_str}')
             if FLAGS.wandb_project:
                 wandb.log(log_info, step=step)
+
             neg_sample_count = 0
+            info_acc.clear()
+            neg_acc.clear()
 
         if FLAGS.viz_interval > 0 and step % FLAGS.viz_interval == 0:
             if FLAGS.wandb_project and viz_obs.shape[0] > 0:
