@@ -12,7 +12,7 @@ WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 UNAME="junjolp2026spring"
-DEVICE='"device=0,1"'
+DEVICE='"device=cpu"'
 
 # ---- Parameters -------------------------------------------------------------
 ENV_NAME="antmaze-giant-navigate-v0"
