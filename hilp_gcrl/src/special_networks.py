@@ -127,35 +127,30 @@ class DualGoalPhiValue(nn.Module):
     V(s, g) = psi(s)^T phi(g)
       psi: state encoder (s -> R^skill_dim)
       phi: goal encoder  (g -> R^skill_dim), the 'dual' representation
-
-    ensemble=False (paper default): single (psi, phi) pair -> scalar V per (s,g).
-    ensemble=True: two independent (psi, phi) pairs -> returns (V1, V2).
+    Single (psi, phi) pair — no ensemble.
     """
     hidden_dims: tuple = (256, 256)
     skill_dim: int = 32
     use_layer_norm: bool = True
-    ensemble: bool = False
     encoder: nn.Module = None
 
     def setup(self):
         repr_class = LayerNormRepresentation if self.use_layer_norm else Representation
-        self.psi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=self.ensemble)
-        self.phi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=self.ensemble)
+        self.psi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=False)
+        self.phi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=False)
 
     def get_phi(self, goals):
         """phi(g): dual goal representation. Returns (B, D)."""
-        out = self.phi(goals)
-        return out[0] if self.ensemble else out  # ensemble: (2,B,D)[0]->(B,D); single: (B,D)
+        return self.phi(goals)
 
     def get_psi(self, observations):
         """psi(s): state representation. Returns (B, D)."""
-        out = self.psi(observations)
-        return out[0] if self.ensemble else out
+        return self.psi(observations)
 
     def __call__(self, observations, goals=None):
-        psi_s = self.psi(observations)   # (B, D) or (2, B, D)
-        phi_g = self.phi(goals)          # (B, D) or (2, B, D)
-        v = (psi_s * phi_g).sum(axis=-1) # (B,)   or (2, B)
+        psi_s = self.psi(observations)    # (B, D)
+        phi_g = self.phi(goals)           # (B, D)
+        v = (psi_s * phi_g).sum(axis=-1)  # (B,)
         return v
 
 

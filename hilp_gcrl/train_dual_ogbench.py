@@ -214,7 +214,6 @@ class DualHILP(flax.struct.PyTreeNode):
             hidden_dims=tuple(value_hidden_dims),
             skill_dim=skill_dim,
             use_layer_norm=bool(use_layer_norm),
-            ensemble=False,  # paper: single (psi, phi) pair
         )
 
         # Q(s,a,g) = MLP([s, g, a]) — separate Q network (Algorithm 1)
