@@ -14,6 +14,8 @@ def shard_batch(batch):
     d = jax.local_device_count()
 
     def reshape(x):
+        if x.ndim == 0:
+            return x
         assert (
             x.shape[0] % d == 0
         ), f"Batch size needs to be divisible by # devices, got {x.shape[0]} and {d}"
