@@ -62,6 +62,9 @@ for i in "${!P1_CKPTS[@]}"; do
     STEP=$(basename "${P1_CKPTS[$i]}" .pkl | sed 's/params_//')
     echo "  [$((i+1))] step ${STEP}"
 done
+
+# Default to the latest (last) available checkpoint, not the hardcoded value
+DUAL_RESTORE_EPOCH=$(basename "${P1_CKPTS[-1]}" .pkl | sed 's/params_//')
 echo ""
 read -rp "Select Phase 1 checkpoint to load [default: ${DUAL_RESTORE_EPOCH}]: " P1_CHOICE
 
@@ -70,9 +73,15 @@ if [[ "$P1_CHOICE" =~ ^[0-9]+$ ]] && [ "$P1_CHOICE" -ge 1 ] && [ "$P1_CHOICE" -l
     DUAL_RESTORE_EPOCH=$(basename "${P1_CKPTS[$IDX]}" .pkl | sed 's/params_//')
     echo "→ Using Phase 1 checkpoint at step ${DUAL_RESTORE_EPOCH}"
 elif [ -z "$P1_CHOICE" ]; then
-    echo "→ Using default Phase 1 epoch: ${DUAL_RESTORE_EPOCH}"
+    echo "→ Using Phase 1 checkpoint at step ${DUAL_RESTORE_EPOCH} (latest)"
 else
     echo "Invalid choice. Aborting."
+    exit 1
+fi
+
+# Verify the selected checkpoint file actually exists
+if [ ! -f "${HOST_DUAL_DIR}/params_${DUAL_RESTORE_EPOCH}.pkl" ]; then
+    echo "ERROR: Checkpoint file not found: ${HOST_DUAL_DIR}/params_${DUAL_RESTORE_EPOCH}.pkl"
     exit 1
 fi
 
