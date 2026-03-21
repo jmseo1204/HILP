@@ -22,9 +22,9 @@
   "codePath": "train_dual_ogbench.py",
   "codePathLocal": "train_dual_ogbench.py",
   "git": {
-    "remote": "https://github.com/jmseo1204/HILP.git"
+    "remote": "https://github.com/junjolp2026spring/HILP.git"
   },
-  "email": "jmseo1204@snu.ac.kr",
+  "email": "junjolp2026spring@snu.ac.kr",
   "root": "/workspace/HILP/hilp_gcrl",
   "host": "1d33bdfbaab6",
   "executable": "/usr/bin/python3",

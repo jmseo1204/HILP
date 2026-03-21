@@ -124,15 +124,24 @@ class GoalConditionedCritic(nn.Module):
 class DualGoalPhiValue(nn.Module):
     """
     Dual Goal Representation value function (arXiv:2510.06714).
-    V(s, g) = psi(s)^T phi(g)
-      psi: state encoder (s -> R^skill_dim)
-      phi: goal encoder  (g -> R^skill_dim), the 'dual' representation
+    Separate state encoder psi and goal encoder phi.
+
+    aggregator='inner_prod' (default):
+        V(s, g) = psi(s)^T phi(g)
+        Gradient: J_psi(s)^T * phi(g)  — phi(g) acts as goal-direction vector
+
+    aggregator='neg_l2':
+        V(s, g) = -||psi(s) - phi(g)||
+        Gradient direction: unit vector toward phi(g) in latent space,
+        independent of temporal distance (no saturation).
+
     Single (psi, phi) pair — no ensemble.
     """
     hidden_dims: tuple = (256, 256)
     skill_dim: int = 32
     use_layer_norm: bool = True
     encoder: nn.Module = None
+    aggregator: str = 'inner_prod'   # 'inner_prod' | 'neg_l2'
 
     def setup(self):
         repr_class = LayerNormRepresentation if self.use_layer_norm else Representation
@@ -150,7 +159,11 @@ class DualGoalPhiValue(nn.Module):
     def __call__(self, observations, goals=None):
         psi_s = self.psi(observations)    # (B, D)
         phi_g = self.phi(goals)           # (B, D)
-        v = (psi_s * phi_g).sum(axis=-1)  # (B,)
+        if self.aggregator == 'neg_l2':
+            squared_dist = ((psi_s - phi_g) ** 2).sum(axis=-1)
+            v = -jnp.sqrt(jnp.maximum(squared_dist, 1e-6))
+        else:  # 'inner_prod'
+            v = (psi_s * phi_g).sum(axis=-1)
         return v
 
 

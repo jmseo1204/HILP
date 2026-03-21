@@ -10,8 +10,8 @@ set -e
 WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
-UNAME="jmseo1204"
-DEVICE='"device=0"'
+UNAME="junjolp2026spring"
+DEVICE='"device=0,1"'
 
 # ---- Parameters (must match Phase 1 settings) -------------------------------
 ENV_NAME="antmaze-giant-navigate-v0"

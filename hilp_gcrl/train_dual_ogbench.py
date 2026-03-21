@@ -1,10 +1,18 @@
 """
 Train Dual Goal Representations on OGBench environments.
 
-Phase 1 of arXiv:2510.06714:
-  V(s, g) = psi(s)^T phi(g)  (inner product, separate state/goal encoders)
+Phase 1 of arXiv:2510.06714 — two aggregator modes:
 
-Follows Algorithm 1 with separate Q network:
+  inner_prod (default):
+    V(s, g) = psi(s)^T phi(g)
+    Gradient: J_psi(s)^T * phi(g)  (phi(g) acts as goal-direction vector)
+
+  neg_l2:
+    V(s, g) = -||psi(s) - phi(g)||
+    Gradient direction: unit vector toward phi(g) in latent space,
+    independent of temporal distance (no saturation for far goals).
+
+Both modes follow Algorithm 1 with a separate Q network:
   L(psi, phi) = E[ l2_kappa( V(s,g) - Q_bar(s,a,g) ) ]
   L(Q)        = E[ (Q(s,a,g) - r(s,g) - gamma * V(s',g))^2 ]
   Q_bar       <- EMA of Q
@@ -204,16 +212,17 @@ class DualHILP(flax.struct.PyTreeNode):
     def create(cls, seed, ex_observations, ex_actions, lr=3e-4,
                value_hidden_dims=(512, 512, 512), discount=0.99, tau=0.005,
                expectile=0.95, use_layer_norm=1, skill_dim=32,
-               grad_clip_norm=1.0, **kwargs):
-        print('DualHILP.create — extra kwargs:', kwargs)
+               grad_clip_norm=1.0, aggregator='inner_prod', **kwargs):
+        print(f'DualHILP.create — aggregator={aggregator}  extra kwargs:', kwargs)
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
 
-        # V(s,g) = psi(s)^T phi(g)
+        # V(s,g): aggregator selects inner_prod or neg_l2
         value_def = DualGoalPhiValue(
             hidden_dims=tuple(value_hidden_dims),
             skill_dim=skill_dim,
             use_layer_norm=bool(use_layer_norm),
+            aggregator=aggregator,
         )
 
         # Q(s,a,g) = MLP([s, g, a]) — separate Q network (Algorithm 1)
@@ -247,7 +256,7 @@ class DualHILP(flax.struct.PyTreeNode):
         return cls(network=network,
                    config=flax.core.FrozenDict(
                        discount=discount, tau=tau, expectile=expectile,
-                       skill_dim=skill_dim))
+                       skill_dim=skill_dim, aggregator=aggregator))
 
 
 # ======================== Main ===============================================
@@ -306,6 +315,7 @@ def main(_):
         use_layer_norm    = FLAGS.use_layer_norm,
         skill_dim         = FLAGS.skill_dim,
         grad_clip_norm    = FLAGS.grad_clip_norm,
+        aggregator        = FLAGS.aggregator,
     )
 
     # ---- Resume from checkpoint if requested --------------------------------
@@ -375,6 +385,8 @@ if __name__ == '__main__':
     flags.DEFINE_float  ('p_randomgoal',   0.375,   '')
     flags.DEFINE_integer('geom_sample',    1,       '')
     flags.DEFINE_float  ('grad_clip_norm', 1.0,     'Max gradient global norm.')
+    flags.DEFINE_string ('aggregator',     'inner_prod',
+                         'Value aggregation: inner_prod (psi^T phi) or neg_l2 (-||psi-phi||).')
     flags.DEFINE_integer('resume_step',    0,       'Resume from this step. 0 = start from scratch.')
     flags.DEFINE_string ('wandb_project',  '',      'WandB project name. Empty = disabled.')
     flags.DEFINE_string ('wandb_run_name', '',      'WandB run name. Empty = auto.')
