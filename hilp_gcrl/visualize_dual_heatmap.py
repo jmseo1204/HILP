@@ -89,7 +89,31 @@ def _batched(fn, arr, chunk=5000):
                            for i in range(0, arr.shape[0], chunk)])
 
 
-def _plot(X, Y, values, mi, gx, gy, title, cbar_label, path):
+def _compute_value_grad_field(scalar_v_fn, obs_batch, X, chunk=2000):
+    """
+    Compute dV/d(x,y) for each grid point using JAX autograd.
+
+    scalar_v_fn : callable (obs_dim,) -> scalar, JAX-differentiable.
+    obs_batch   : (N, obs_dim) numpy float32.
+    X           : (H, W) meshgrid for shape reference.
+
+    Returns: grad_field (H, W, 2), norms (H, W).
+    """
+    grad_fn = jax.jit(jax.vmap(jax.grad(scalar_v_fn)))
+    N = obs_batch.shape[0]
+    print(f'  Computing value gradient field ({N} points) ...')
+    grads_list = []
+    for i in range(0, N, chunk):
+        g = np.array(grad_fn(jnp.array(obs_batch[i:i+chunk])))
+        grads_list.append(g[:, :2])   # only x, y components
+    grads_xy = np.concatenate(grads_list, axis=0)  # (N, 2)
+    grad_field = grads_xy.reshape(*X.shape, 2)
+    norms = np.linalg.norm(grad_field, axis=-1)
+    return grad_field, norms
+
+
+def _plot(X, Y, values, mi, gx, gy, title, cbar_label, path,
+          grad_field=None, quiver_step=6):
     fig, ax = plt.subplots(figsize=(12, 10))
     try:
         ax.imshow(1 - mi['maze_map'], cmap='gray',
@@ -99,9 +123,33 @@ def _plot(X, Y, values, mi, gx, gy, title, cbar_label, path):
         print(f'  Maze background skipped: {e}')
     im = ax.pcolormesh(X, Y, values, shading='auto', cmap='viridis', alpha=0.75)
     fig.colorbar(im, ax=ax, label=cbar_label)
+
+    # ---- Gradient field arrows (∇_s V(s,g)) ---------------------------------
+    if grad_field is not None:
+        Xq = X[::quiver_step, ::quiver_step]
+        Yq = Y[::quiver_step, ::quiver_step]
+        U  = grad_field[::quiver_step, ::quiver_step, 0]
+        V  = grad_field[::quiver_step, ::quiver_step, 1]
+
+        # Normalize to unit direction vectors; encode magnitude via alpha
+        mag  = np.sqrt(U**2 + V**2 + 1e-8)
+        Un   = np.where(np.isnan(U), np.nan, U / mag)
+        Vn   = np.where(np.isnan(V), np.nan, V / mag)
+
+        # Mask arrows at wall/NaN grid cells
+        val_q = values[::quiver_step, ::quiver_step]
+        Un = np.where(np.isnan(val_q), np.nan, Un)
+        Vn = np.where(np.isnan(val_q), np.nan, Vn)
+
+        ax.quiver(Xq, Yq, Un, Vn,
+                  color='crimson', alpha=0.70,
+                  angles='xy', pivot='mid',
+                  scale=30, scale_units='inches',
+                  zorder=5, label='∇V(s,g)')
+
     ax.scatter([gx], [gy], c='red', marker='*', s=500,
                edgecolors='white', linewidths=0.8,
-               label=f'Goal ({gx:.2f}, {gy:.2f})', zorder=5)
+               label=f'Goal ({gx:.2f}, {gy:.2f})', zorder=6)
     ax.set(xlabel='X', ylabel='Y', title=title)
     ax.legend()
     fig.tight_layout()
@@ -157,12 +205,28 @@ def _run_dual_repr(obs_all, ex_act, mi):
     values = _batched(value_fn, obs_batch).reshape(X.shape)
     values = _wall_mask(values, X, Y, mi)
 
+    # ---- Gradient field ∇_s V(s,g) ------------------------------------------
+    phi_g_jnp = jnp.array(phi_g[0])  # (D,)
+    if agg == 'neg_l2':
+        def scalar_v(single_obs):
+            psi_s = agent.network(single_obs[None], method='phi')[0]  # (D,)
+            diff  = psi_s - phi_g_jnp
+            return -jnp.sqrt(jnp.maximum((diff**2).sum(), 1e-6))
+    else:
+        def scalar_v(single_obs):
+            psi_s = agent.network(single_obs[None], method='phi')[0]  # (D,)
+            return (psi_s * phi_g_jnp).sum()
+
+    grad_field, _ = _compute_value_grad_field(scalar_v, obs_batch, X)
+    # Mask walls
+    grad_field = np.where(np.isnan(values)[..., None], np.nan, grad_field)
+
     if agg == 'neg_l2':
         v_formula, cbar_label = 'V = -‖ψ(s)−φ(g)‖', 'V(s,g) = -‖ψ(s)−φ(g)‖  [neg L2 dist]'
     else:
         v_formula, cbar_label = 'V = ψ(s)ᵀφ(g)', 'V(s,g) = ψ(s)ᵀφ(g)  [inner product]'
     title = f'Dual Repr  {v_formula}\n{FLAGS.env_name}  |  Goal ({gx:.2f}, {gy:.2f})'
-    return X, Y, values, gx, gy, title, cbar_label
+    return X, Y, values, gx, gy, title, cbar_label, grad_field
 
 
 def _run_gcvf(obs_all, ex_act, mi):
@@ -205,9 +269,21 @@ def _run_gcvf(obs_all, ex_act, mi):
     print(f'[gcvf] Computing values on {obs_batch.shape[0]} grid points ...')
     values = _batched(value_fn, obs_batch).reshape(X.shape)
     values = _wall_mask(values, X, Y, mi)
+
+    # ---- Gradient field ∇_s V_down(s, phi(g)) --------------------------------
+    phi_g_jnp = jnp.array(phi_g)   # (1, D) — kept as 2D for network call
+
+    def scalar_v(single_obs):
+        v1, v2 = gcvf_agent.network(single_obs[None], phi_g_jnp, method='value')
+        return (v1[0] + v2[0]) / 2
+
+    grad_field, _ = _compute_value_grad_field(scalar_v, obs_batch, X)
+    grad_field = np.where(np.isnan(values)[..., None], np.nan, grad_field)
+
     return X, Y, values, gx, gy, \
         f'Downstream GCVF  V(s, φ(g))\n{FLAGS.env_name}  |  Goal ({gx:.2f}, {gy:.2f})', \
-        'V_down(s, φ(g))  [goal-conditioned value]'
+        'V_down(s, φ(g))  [goal-conditioned value]', \
+        grad_field
 
 
 # ======================== Main ===============================================
@@ -233,16 +309,17 @@ def main(_):
                   maze_h=0, maze_w=0, xmin=xmn, xmax=xmx, ymin=ymn, ymax=ymx)
 
     if FLAGS.mode == 'dual_repr':
-        X, Y, values, gx, gy, title, cbar = _run_dual_repr(obs_all, ex_act, mi)
+        X, Y, values, gx, gy, title, cbar, grad_field = _run_dual_repr(obs_all, ex_act, mi)
     else:
-        X, Y, values, gx, gy, title, cbar = _run_gcvf(obs_all, ex_act, mi)
+        X, Y, values, gx, gy, title, cbar, grad_field = _run_gcvf(obs_all, ex_act, mi)
 
     gx_s  = f'{gx:.1f}'.replace('.', '_').replace('-', 'm')
     gy_s  = f'{gy:.1f}'.replace('.', '_').replace('-', 'm')
     fname = (f'dual_{FLAGS.mode}_{FLAGS.env_name}'
              f'_x{gx_s}_y{gy_s}_ep{FLAGS.restore_epoch}.png')
     _plot(X, Y, values, mi, gx, gy, title, cbar,
-          os.path.join(FLAGS.save_dir, fname))
+          os.path.join(FLAGS.save_dir, fname),
+          grad_field=grad_field)
 
 
 if __name__ == '__main__':
