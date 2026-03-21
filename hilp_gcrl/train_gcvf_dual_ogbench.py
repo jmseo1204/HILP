@@ -227,6 +227,13 @@ def main(_):
         expectile=FLAGS.expectile, use_layer_norm=FLAGS.use_layer_norm,
     )
 
+    # ---- Resume Phase-2 from checkpoint if requested ------------------------
+    start_step = 1
+    if FLAGS.resume_step > 0:
+        gcvf_agent = restore_agent(gcvf_agent, FLAGS.save_dir, FLAGS.resume_step)
+        start_step = FLAGS.resume_step + 1
+        print(f'[GCVFDual] Resumed from step {FLAGS.resume_step}, continuing from step {start_step}')
+
     # ---- Build train_step (pmap for multi-GPU, jit for single GPU) ----------
     get_phi_goal_jit = jax.jit(dual_agent.get_phi_goal)
 
@@ -242,7 +249,7 @@ def main(_):
             return agent.update(batch, phi_g)
 
     # ---- Training loop ------------------------------------------------------
-    for step in tqdm.tqdm(range(1, FLAGS.train_steps + 1),
+    for step in tqdm.tqdm(range(start_step, FLAGS.train_steps + 1),
                           smoothing=0.1, dynamic_ncols=True):
         batch = gc_dataset.sample(FLAGS.batch_size)
         phi_g = np.array(get_phi_goal_jit(batch['goals']))   # (B, skill_dim)
@@ -294,6 +301,7 @@ if __name__ == '__main__':
     flags.DEFINE_float  ('p_trajgoal',          0.5,     'Paper Table 9: downstream value ratio.')
     flags.DEFINE_float  ('p_randomgoal',        0.3,     'Paper Table 9: downstream value ratio.')
     flags.DEFINE_integer('geom_sample',         1,       '')
+    flags.DEFINE_integer('resume_step',         0,       'Resume Phase-2 from this step. 0 = start from scratch.')
     flags.DEFINE_string ('wandb_project',       '',      'WandB project name. Empty = disabled.')
     flags.DEFINE_string ('wandb_run_name',      '',      'WandB run name. Empty = auto.')
     app.run(main)

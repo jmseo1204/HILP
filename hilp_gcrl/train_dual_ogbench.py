@@ -308,6 +308,13 @@ def main(_):
         grad_clip_norm    = FLAGS.grad_clip_norm,
     )
 
+    # ---- Resume from checkpoint if requested --------------------------------
+    start_step = 1
+    if FLAGS.resume_step > 0:
+        agent = restore_agent(agent, FLAGS.save_dir, FLAGS.resume_step)
+        start_step = FLAGS.resume_step + 1
+        print(f'[DualHILP] Resumed from step {FLAGS.resume_step}, continuing from step {start_step}')
+
     # ---- Build train_step (pmap for multi-GPU, jit for single GPU) ----------
     if n_devices > 1:
         agent = jax.device_put_replicated(agent, jax.local_devices())
@@ -321,7 +328,7 @@ def main(_):
             return agent.update(batch)
 
     # ---- Training loop ------------------------------------------------------
-    for step in tqdm.tqdm(range(1, FLAGS.train_steps + 1),
+    for step in tqdm.tqdm(range(start_step, FLAGS.train_steps + 1),
                           smoothing=0.1, dynamic_ncols=True):
         batch = gc_dataset.sample(FLAGS.batch_size)
         if n_devices > 1:
@@ -368,6 +375,7 @@ if __name__ == '__main__':
     flags.DEFINE_float  ('p_randomgoal',   0.375,   '')
     flags.DEFINE_integer('geom_sample',    1,       '')
     flags.DEFINE_float  ('grad_clip_norm', 1.0,     'Max gradient global norm.')
+    flags.DEFINE_integer('resume_step',    0,       'Resume from this step. 0 = start from scratch.')
     flags.DEFINE_string ('wandb_project',  '',      'WandB project name. Empty = disabled.')
     flags.DEFINE_string ('wandb_run_name', '',      'WandB run name. Empty = auto.')
     app.run(main)
