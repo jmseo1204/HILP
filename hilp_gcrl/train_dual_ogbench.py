@@ -340,7 +340,11 @@ class DualHILP(flax.struct.PyTreeNode):
         neg_w = jnp.squeeze(batch['neg_weight'])
         loss = loss + self.config['lambda_neg'] * neg_w * loss_neg
 
-        info['value/neg_loss'] = loss_neg * neg_w
+        info['neg/loss_weighted'] = loss_neg * neg_w
+        info['neg/loss_raw']      = loss_neg          # constraint 충족 여부: 0이면 V_neg < v_floor
+        info['neg/v_neg_mean']    = v_neg.mean()      # v_floor 아래여야 정상
+        info['neg/v_neg_max']     = v_neg.max()       # 가장 위험한 값; v_floor보다 낮아야 함
+        info['neg/active']        = neg_w             # 이 step이 active였는지 (0 or 1)
         info['loss'] = loss
         return loss, info
 
@@ -554,13 +558,15 @@ def main(_):
             batch['neg_states'] = np.zeros((n, obs_dim), dtype=np.float32)
             batch['neg_goals']  = np.zeros((n, obs_dim), dtype=np.float32)
             batch['neg_weight'] = np.zeros(n_devices, dtype=np.float32)
-        return batch
+        return batch, active
 
     # ---- Training loop ------------------------------------------------------
+    neg_sample_count = 0  # log_interval 동안 active된 횟수
     for step in tqdm.tqdm(range(start_step, FLAGS.train_steps + 1),
                           smoothing=0.1, dynamic_ncols=True):
         batch = gc_dataset.sample(FLAGS.batch_size)
-        batch = _inject_neg_samples(batch)
+        batch, is_active = _inject_neg_samples(batch)
+        neg_sample_count += int(is_active)
         if n_devices > 1:
             batch = shard_batch(batch)
         agent, info = train_step(agent, batch)
@@ -570,10 +576,14 @@ def main(_):
                 log_info = {k: float(v[0]) for k, v in info.items()}
             else:
                 log_info = {k: float(v) for k, v in info.items()}
+            log_info['neg/sample_count']    = neg_sample_count
+            log_info['neg/sample_rate']     = neg_sample_count / FLAGS.log_interval
+            log_info['neg/prohibited_size'] = prohibited_obs.shape[0] if prohibited_obs is not None else 0
             log_str = '  '.join(f'{k}={v:.4f}' for k, v in log_info.items())
             tqdm.tqdm.write(f'[step {step:>8d}] {log_str}')
             if FLAGS.wandb_project:
                 wandb.log(log_info, step=step)
+            neg_sample_count = 0
 
         if FLAGS.viz_interval > 0 and step % FLAGS.viz_interval == 0:
             if FLAGS.wandb_project and viz_obs.shape[0] > 0:
