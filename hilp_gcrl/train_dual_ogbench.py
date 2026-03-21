@@ -332,9 +332,18 @@ class DualHILP(flax.struct.PyTreeNode):
         # neg_weight is 0.0 (inactive) or 1.0 (active) — keeps dict structure
         # constant across steps so JIT traces only once.
         v_floor = self.config['v_floor']
-        v_neg = self.network(
-            batch['neg_states'], batch['neg_goals'],
-            method='value', params=network_params)
+        # psi(neg_state)만 역전파. phi(neg_goal)은 stop_gradient:
+        # neg loss 목적은 장애물 state repr 수정이며,
+        # 정상 goal repr(phi)을 장애물 방향으로 오염시키지 않기 위함.
+        psi_neg = self.network(
+            batch['neg_states'], method='phi', params=network_params)
+        phi_neg_goal = jax.lax.stop_gradient(
+            self.network(batch['neg_goals'], method='phi_goal', params=network_params))
+        if self.config['aggregator'] == 'neg_l2':
+            squared_dist = ((psi_neg - phi_neg_goal) ** 2).sum(axis=-1)
+            v_neg = -jnp.sqrt(jnp.maximum(squared_dist, 1e-6))
+        else:  # inner_prod
+            v_neg = (psi_neg * phi_neg_goal).sum(axis=-1)
         hinge = jnp.maximum(v_neg - v_floor, 0.0)
         loss_neg = (hinge ** 2).mean()
         neg_w = jnp.squeeze(batch['neg_weight'])
