@@ -148,10 +148,6 @@ def _plot(X, Y, values, mi, gx, gy, title, cbar_label, path,
         Yq = Y[::quiver_step, ::quiver_step]
         gf_q = grad_field[::quiver_step, ::quiver_step, :]   # (H', W', 2)
 
-        # Mask wall/NaN cells before normalization
-        val_q = values[::quiver_step, ::quiver_step]
-        gf_q = np.where(np.isnan(val_q)[..., None], np.nan, gf_q)
-
         Un, Vn, g_mean, g_std = _normalize_grad(gf_q)
 
         print(f'  [∇V diag] mag mean={g_mean:.4e}  std={g_std:.4e}')
@@ -235,7 +231,7 @@ def _run_dual_repr(obs_all, ex_act, mi):
 
     grad_field, _ = _compute_value_grad_field(scalar_v, obs_batch, X)
     # Mask walls
-    grad_field = np.where(np.isnan(values)[..., None], np.nan, grad_field)
+    # (wall masking removed — arrows shown everywhere including walls)
 
     if agg == 'neg_l2':
         v_formula, cbar_label = 'V = -‖ψ(s)−φ(g)‖', 'V(s,g) = -‖ψ(s)−φ(g)‖  [neg L2 dist]'
@@ -294,7 +290,7 @@ def _run_gcvf(obs_all, ex_act, mi):
         return (v1[0] + v2[0]) / 2
 
     grad_field, _ = _compute_value_grad_field(scalar_v, obs_batch, X)
-    grad_field = np.where(np.isnan(values)[..., None], np.nan, grad_field)
+    # (wall masking removed — arrows shown everywhere including walls)
 
     return X, Y, values, gx, gy, \
         f'Downstream GCVF  V(s, φ(g))\n{FLAGS.env_name}  |  Goal ({gx:.2f}, {gy:.2f})', \

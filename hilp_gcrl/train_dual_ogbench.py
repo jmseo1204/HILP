@@ -26,6 +26,7 @@ import os
 import sys
 import glob
 import pickle
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from sklearn.manifold import TSNE
 from shapely.geometry import Point, box
 from shapely.ops import unary_union
+from scipy.spatial import KDTree
 
 # ---- hilp_gcrl internal imports ---------------------------------------------
 _ROOT = Path(__file__).parent          # hilp_gcrl/
@@ -62,23 +64,26 @@ FLAGS = flags.FLAGS
 
 def save_agent(agent, save_dir, step):
     os.makedirs(save_dir, exist_ok=True)
-    path = os.path.join(save_dir, f'params_{step}.pkl')
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(save_dir, f'params_{step}_{ts}.pkl')
     with open(path, 'wb') as f:
         pickle.dump({'agent': flax.serialization.to_state_dict(agent)}, f)
     print(f'Saved → {path}')
-    # Remove previous checkpoints, keeping only the latest
-    for old in glob.glob(os.path.join(save_dir, 'params_*.pkl')):
-        if old != path:
-            os.remove(old)
-            print(f'Removed → {old}')
 
 
-def restore_agent(agent, restore_path, restore_epoch):
-    candidates = glob.glob(restore_path)
-    assert len(candidates) == 1, f'Expected 1 match, got {len(candidates)}: {candidates}'
-    path = candidates[0] + f'/params_{restore_epoch}.pkl'
+def restore_agent(agent, restore_dir, restore_epoch):
+    pattern = os.path.join(restore_dir, f'params_{restore_epoch}_*.pkl')
+    candidates = glob.glob(pattern)
+    # Fall back to legacy filename without timestamp
+    if not candidates:
+        legacy = os.path.join(restore_dir, f'params_{restore_epoch}.pkl')
+        if os.path.exists(legacy):
+            candidates = [legacy]
+    assert len(candidates) >= 1, f'No checkpoint found for step {restore_epoch} in {restore_dir}'
+    path = sorted(candidates)[-1]   # use latest timestamp if multiple exist
     with open(path, 'rb') as f:
         load_dict = pickle.load(f)
+    print(f'Restored ← {path}')
     return flax.serialization.from_state_dict(agent, load_dict['agent'])
 
 
@@ -187,6 +192,41 @@ def generate_tsne_visualization(agent, obs_array, xy_array, step, seed, aggregat
     return image
 
 
+def _build_prohibited_obs(dataset_obs, obs_template, threshold, grid_step=0.5):
+    """
+    Build a set of prohibited-zone observations.
+
+    1. Bounding box of dataset xy positions.
+    2. Fine grid (grid_step spacing) within that box.
+    3. KD-tree query: keep grid points whose nearest dataset point >= threshold.
+    4. Return full-dimensional observations (xy replaced, rest from template).
+
+    Returns:
+        prohibited_obs : (N_neg, obs_dim) float32,  or empty (0, obs_dim)
+    """
+    xy = dataset_obs[:, :2].astype(np.float64)
+    x_min, y_min = xy.min(axis=0)
+    x_max, y_max = xy.max(axis=0)
+
+    xs = np.arange(x_min, x_max + grid_step, grid_step)
+    ys = np.arange(y_min, y_max + grid_step, grid_step)
+    X, Y = np.meshgrid(xs, ys)
+    grid_pts = np.stack([X.ravel(), Y.ravel()], axis=1)
+
+    tree = KDTree(xy)
+    dist, _ = tree.query(grid_pts, workers=-1)
+    mask = dist >= threshold
+    neg_xy = grid_pts[mask].astype(np.float32)
+
+    if neg_xy.shape[0] == 0:
+        return np.zeros((0, obs_template.shape[0]), dtype=np.float32)
+
+    rest = obs_template[2:].astype(np.float32)
+    neg_obs = np.tile(rest, (neg_xy.shape[0], 1))
+    neg_obs = np.concatenate([neg_xy, neg_obs], axis=1)
+    return neg_obs
+
+
 # ======================== Network ============================================
 
 class DualValueNetwork(nn.Module):
@@ -282,8 +322,25 @@ class DualHILP(flax.struct.PyTreeNode):
             'value/q_bar_mean':  q_bar.mean(),
             'value/q_bar_max':   q_bar.max(),
             'value/q_bar_min':   q_bar.min(),
-            'loss':              loss,
         }
+
+        # ---- Prohibited-zone negative penalty (V-only) ----------------------
+        # Pushes V(s_neg, g) below V_floor = reward_shift / (1 - discount)
+        # via hinge loss: penalty only when V(s_neg, g) > V_floor.
+        # Q network is NOT touched — no Bellman backup pollution.
+        #
+        # neg_weight is 0.0 (inactive) or 1.0 (active) — keeps dict structure
+        # constant across steps so JIT traces only once.
+        v_floor = self.config['v_floor']
+        v_neg = self.network(
+            batch['neg_states'], batch['neg_goals'],
+            method='value', params=network_params)
+        hinge = jnp.maximum(v_neg - v_floor, 0.0)
+        loss_neg = (hinge ** 2).mean()
+        loss = loss + self.config['lambda_neg'] * batch['neg_weight'] * loss_neg
+
+        info['value/neg_loss'] = loss_neg * batch['neg_weight']
+        info['loss'] = loss
         return loss, info
 
     def update(self, batch, pmap_axis=None):
@@ -322,7 +379,8 @@ class DualHILP(flax.struct.PyTreeNode):
     def create(cls, seed, ex_observations, ex_actions, lr=3e-4,
                value_hidden_dims=(512, 512, 512), discount=0.99, tau=0.005,
                expectile=0.95, use_layer_norm=1, skill_dim=32,
-               grad_clip_norm=1.0, aggregator='inner_prod', **kwargs):
+               grad_clip_norm=1.0, aggregator='inner_prod',
+               lambda_neg=0.1, v_floor=None, **kwargs):
         print(f'DualHILP.create — aggregator={aggregator}  extra kwargs:', kwargs)
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
@@ -363,10 +421,16 @@ class DualHILP(flax.struct.PyTreeNode):
         params['networks_target_q'] = params['networks_q_func']
         network = network.replace(params=params)
 
+        # V_floor = reward_shift / (1 - discount)  =  -1 / (1 - 0.995)  =  -200
+        if v_floor is None:
+            v_floor = -1.0 / (1.0 - discount)
+        print(f'DualHILP.create — v_floor={v_floor:.2f}  lambda_neg={lambda_neg}')
+
         return cls(network=network,
                    config=flax.core.FrozenDict(
                        discount=discount, tau=tau, expectile=expectile,
-                       skill_dim=skill_dim, aggregator=aggregator))
+                       skill_dim=skill_dim, aggregator=aggregator,
+                       lambda_neg=lambda_neg, v_floor=v_floor))
 
 
 # ======================== Main ===============================================
@@ -416,6 +480,18 @@ def main(_):
     viz_obs, viz_xy = _build_traversable_obs(env, obs_template)
     print(f'[DualHILP] Traversable viz points: {viz_obs.shape[0]}')
 
+    # ---- Build prohibited-zone observations for negative sampling ----------
+    prohibited_obs = None
+    if FLAGS.p_prohibit > 0 and FLAGS.prohibit_threshold > 0:
+        prohibited_obs = _build_prohibited_obs(
+            dataset['observations'], obs_template,
+            threshold=FLAGS.prohibit_threshold)
+        print(f'[DualHILP] Prohibited zone: {prohibited_obs.shape[0]} points  '
+              f'(threshold={FLAGS.prohibit_threshold})')
+        if prohibited_obs.shape[0] == 0:
+            print('[DualHILP] WARNING: no prohibited points found, disabling negative sampling.')
+            prohibited_obs = None
+
     ex_obs = train_data['observations'][:1]
     ex_act = train_data['actions'][:1]
     agent  = DualHILP.create(
@@ -431,6 +507,7 @@ def main(_):
         skill_dim         = FLAGS.skill_dim,
         grad_clip_norm    = FLAGS.grad_clip_norm,
         aggregator        = FLAGS.aggregator,
+        lambda_neg        = FLAGS.lambda_neg,
     )
 
     # ---- Resume from checkpoint if requested --------------------------------
@@ -452,10 +529,37 @@ def main(_):
         def train_step(agent, batch):
             return agent.update(batch)
 
+    # ---- Negative sampling helper -------------------------------------------
+    all_obs = train_data['observations']
+
+    def _inject_neg_samples(batch):
+        """Always inject neg_states/neg_goals/neg_weight into batch.
+
+        When active (probability p_prohibit): real prohibited-zone states,
+        neg_weight=1.0.  When inactive: dummy zeros, neg_weight=0.0.
+        Dict structure is constant across steps so JIT traces only once.
+        """
+        n = batch['observations'].shape[0]
+        obs_dim = batch['observations'].shape[1]
+        active = (prohibited_obs is not None
+                  and np.random.rand() < FLAGS.p_prohibit)
+        if active:
+            neg_idx  = np.random.randint(prohibited_obs.shape[0], size=n)
+            goal_idx = np.random.randint(all_obs.shape[0], size=n)
+            batch['neg_states'] = prohibited_obs[neg_idx].astype(np.float32)
+            batch['neg_goals']  = all_obs[goal_idx].astype(np.float32)
+            batch['neg_weight'] = np.float32(1.0)
+        else:
+            batch['neg_states'] = np.zeros((n, obs_dim), dtype=np.float32)
+            batch['neg_goals']  = np.zeros((n, obs_dim), dtype=np.float32)
+            batch['neg_weight'] = np.float32(0.0)
+        return batch
+
     # ---- Training loop ------------------------------------------------------
     for step in tqdm.tqdm(range(start_step, FLAGS.train_steps + 1),
                           smoothing=0.1, dynamic_ncols=True):
         batch = gc_dataset.sample(FLAGS.batch_size)
+        batch = _inject_neg_samples(batch)
         if n_devices > 1:
             batch = shard_batch(batch)
         agent, info = train_step(agent, batch)
@@ -511,6 +615,9 @@ if __name__ == '__main__':
     flags.DEFINE_float  ('grad_clip_norm', 1.0,     'Max gradient global norm.')
     flags.DEFINE_string ('aggregator',     'inner_prod',
                          'Value aggregation: inner_prod (psi^T phi) or neg_l2 (-||psi-phi||).')
+    flags.DEFINE_float  ('p_prohibit',     0.0,     'Prob of injecting negative (prohibited) samples per step. 0 = disabled.')
+    flags.DEFINE_float  ('lambda_neg',    0.1,     'Weight of prohibited-zone hinge loss.')
+    flags.DEFINE_float  ('prohibit_threshold', 1.5, 'KD-tree distance threshold for prohibited zone.')
     flags.DEFINE_integer('resume_step',    0,       'Resume from this step. 0 = start from scratch.')
     flags.DEFINE_string ('wandb_project',  '',      'WandB project name. Empty = disabled.')
     flags.DEFINE_string ('wandb_run_name', '',      'WandB run name. Empty = auto.')
