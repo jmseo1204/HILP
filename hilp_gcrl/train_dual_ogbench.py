@@ -337,9 +337,10 @@ class DualHILP(flax.struct.PyTreeNode):
             method='value', params=network_params)
         hinge = jnp.maximum(v_neg - v_floor, 0.0)
         loss_neg = (hinge ** 2).mean()
-        loss = loss + self.config['lambda_neg'] * batch['neg_weight'] * loss_neg
+        neg_w = jnp.squeeze(batch['neg_weight'])
+        loss = loss + self.config['lambda_neg'] * neg_w * loss_neg
 
-        info['value/neg_loss'] = loss_neg * batch['neg_weight']
+        info['value/neg_loss'] = loss_neg * neg_w
         info['loss'] = loss
         return loss, info
 
