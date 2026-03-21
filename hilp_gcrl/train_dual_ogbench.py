@@ -548,11 +548,11 @@ def main(_):
             goal_idx = np.random.randint(all_obs.shape[0], size=n)
             batch['neg_states'] = prohibited_obs[neg_idx].astype(np.float32)
             batch['neg_goals']  = all_obs[goal_idx].astype(np.float32)
-            batch['neg_weight'] = np.float32(1.0)
+            batch['neg_weight'] = np.ones(n_devices, dtype=np.float32)
         else:
             batch['neg_states'] = np.zeros((n, obs_dim), dtype=np.float32)
             batch['neg_goals']  = np.zeros((n, obs_dim), dtype=np.float32)
-            batch['neg_weight'] = np.float32(0.0)
+            batch['neg_weight'] = np.zeros(n_devices, dtype=np.float32)
         return batch
 
     # ---- Training loop ------------------------------------------------------
