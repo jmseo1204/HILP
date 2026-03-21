@@ -46,6 +46,8 @@ flags.DEFINE_multi_integer('value_hidden_dims', [512, 512, 512], 'Must match tra
 flags.DEFINE_float  ('discount',           0.99,   'Must match training.')
 flags.DEFINE_float  ('expectile',          0.95,   'Must match training.')
 flags.DEFINE_integer('use_layer_norm',     1,      'Must match training.')
+flags.DEFINE_string ('aggregator',         'inner_prod',
+                     'Value aggregation used at training: inner_prod or neg_l2.')
 flags.DEFINE_list   ('goal_pos',           ['12.0', '8.0'], 'Goal (x, y).')
 flags.DEFINE_integer('grid_res',           100,    'Grid resolution.')
 flags.DEFINE_string ('save_dir',           'visualizations', 'Output dir.')
@@ -122,37 +124,48 @@ def _make_grid(obs_all, mi):
 
 # ======================== Mode implementations ================================
 
-def _run_dual_repr(obs_all, mi):
+def _run_dual_repr(obs_all, ex_act, mi):
     ex_obs = obs_all[:1]
     agent  = DualHILP.create(
-        seed=FLAGS.seed, ex_observations=ex_obs,
+        seed=FLAGS.seed, ex_observations=ex_obs, ex_actions=ex_act,
         value_hidden_dims=tuple(FLAGS.value_hidden_dims),
         skill_dim=FLAGS.skill_dim, discount=FLAGS.discount,
         expectile=FLAGS.expectile, use_layer_norm=FLAGS.use_layer_norm,
+        aggregator=FLAGS.aggregator,
     )
     agent = restore_agent(agent, FLAGS.restore_path, FLAGS.restore_epoch)
 
     gx, gy = float(FLAGS.goal_pos[0]), float(FLAGS.goal_pos[1])
     X, Y, obs_batch, ref = _make_grid(obs_all, mi)
 
-    goal_obs       = ref.copy(); goal_obs[:2] = [gx, gy]
-    phi_g          = np.array(agent.get_phi_goal(goal_obs[None]))  # (1, D)
+    goal_obs = ref.copy(); goal_obs[:2] = [gx, gy]
+    phi_g    = np.array(agent.get_phi_goal(goal_obs[None]))  # (1, D)
+
+    agg = agent.config['aggregator']
 
     @jax.jit
     def value_fn(obs):
         psi_s     = agent.get_psi(obs)
         phi_g_rep = jnp.tile(phi_g, (psi_s.shape[0], 1))
-        return (psi_s * phi_g_rep).sum(axis=-1)
+        if agg == 'neg_l2':
+            diff = psi_s - phi_g_rep
+            return -jnp.sqrt(jnp.maximum((diff ** 2).sum(axis=-1), 1e-6))
+        else:  # inner_prod
+            return (psi_s * phi_g_rep).sum(axis=-1)
 
-    print(f'[dual_repr] Computing values on {obs_batch.shape[0]} grid points ...')
+    print(f'[dual_repr] aggregator={agg}  grid points={obs_batch.shape[0]} ...')
     values = _batched(value_fn, obs_batch).reshape(X.shape)
     values = _wall_mask(values, X, Y, mi)
-    return X, Y, values, gx, gy, \
-        f'Dual Repr  ψ(s)ᵀφ(g)\n{FLAGS.env_name}  |  Goal ({gx:.2f}, {gy:.2f})', \
-        'V(s,g) = ψ(s)ᵀφ(g)  [temporal distance]'
+
+    if agg == 'neg_l2':
+        v_formula, cbar_label = 'V = -‖ψ(s)−φ(g)‖', 'V(s,g) = -‖ψ(s)−φ(g)‖  [neg L2 dist]'
+    else:
+        v_formula, cbar_label = 'V = ψ(s)ᵀφ(g)', 'V(s,g) = ψ(s)ᵀφ(g)  [inner product]'
+    title = f'Dual Repr  {v_formula}\n{FLAGS.env_name}  |  Goal ({gx:.2f}, {gy:.2f})'
+    return X, Y, values, gx, gy, title, cbar_label
 
 
-def _run_gcvf(obs_all, mi):
+def _run_gcvf(obs_all, ex_act, mi):
     if FLAGS.dual_restore_path is None:
         raise ValueError('--dual_restore_path is required in gcvf mode.')
 
@@ -160,10 +173,11 @@ def _run_gcvf(obs_all, mi):
 
     # Frozen Phase-1 dual agent
     dual_agent = DualHILP.create(
-        seed=FLAGS.seed, ex_observations=ex_obs,
+        seed=FLAGS.seed, ex_observations=ex_obs, ex_actions=ex_act,
         value_hidden_dims=tuple(FLAGS.value_hidden_dims),
         skill_dim=FLAGS.skill_dim, discount=FLAGS.discount,
         expectile=FLAGS.expectile, use_layer_norm=FLAGS.use_layer_norm,
+        aggregator=FLAGS.aggregator,
     )
     dual_agent = restore_agent(dual_agent, FLAGS.dual_restore_path, FLAGS.dual_restore_epoch)
 
@@ -205,6 +219,7 @@ def main(_):
     env, dataset, _ = ogbench.make_env_and_datasets(
         FLAGS.env_name, compact_dataset=False)
     obs_all = dataset['observations'].astype(np.float32)
+    ex_act  = dataset['actions'][:1].astype(np.float32)
 
     try:
         mi = _maze_info(env)
@@ -218,9 +233,9 @@ def main(_):
                   maze_h=0, maze_w=0, xmin=xmn, xmax=xmx, ymin=ymn, ymax=ymx)
 
     if FLAGS.mode == 'dual_repr':
-        X, Y, values, gx, gy, title, cbar = _run_dual_repr(obs_all, mi)
+        X, Y, values, gx, gy, title, cbar = _run_dual_repr(obs_all, ex_act, mi)
     else:
-        X, Y, values, gx, gy, title, cbar = _run_gcvf(obs_all, mi)
+        X, Y, values, gx, gy, title, cbar = _run_gcvf(obs_all, ex_act, mi)
 
     gx_s  = f'{gx:.1f}'.replace('.', '_').replace('-', 'm')
     gy_s  = f'{gy:.1f}'.replace('.', '_').replace('-', 'm')
