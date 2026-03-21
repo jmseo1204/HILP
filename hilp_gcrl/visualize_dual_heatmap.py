@@ -112,8 +112,26 @@ def _compute_value_grad_field(scalar_v_fn, obs_batch, X, chunk=2000):
     return grad_field, norms
 
 
+def _normalize_grad(grads):
+    """
+    Normalize gradient field by global mean/std of magnitudes (same as TD_field).
+    Returns (U_norm, V_norm, mean_scalar, std_scalar).
+    """
+    U_raw = grads[:, :, 0]
+    V_raw = grads[:, :, 1]
+    mag = np.sqrt(U_raw**2 + V_raw**2)
+    m = float(np.nanmean(mag))
+    s = float(np.nanstd(mag)) + 1e-8
+    # Shift so mean-magnitude arrows → length ≈ 1; clip to avoid direction flip
+    scale = np.clip((mag - m) / s + 1.0, 0.0, None)
+    denom = mag + 1e-8
+    U_norm = np.where(np.isnan(U_raw), np.nan, U_raw / denom * scale)
+    V_norm = np.where(np.isnan(V_raw), np.nan, V_raw / denom * scale)
+    return U_norm, V_norm, m, s
+
+
 def _plot(X, Y, values, mi, gx, gy, title, cbar_label, path,
-          grad_field=None, quiver_step=6):
+          grad_field=None, quiver_step=3):
     fig, ax = plt.subplots(figsize=(12, 10))
     try:
         ax.imshow(1 - mi['maze_map'], cmap='gray',
@@ -128,24 +146,22 @@ def _plot(X, Y, values, mi, gx, gy, title, cbar_label, path,
     if grad_field is not None:
         Xq = X[::quiver_step, ::quiver_step]
         Yq = Y[::quiver_step, ::quiver_step]
-        U  = grad_field[::quiver_step, ::quiver_step, 0]
-        V  = grad_field[::quiver_step, ::quiver_step, 1]
+        gf_q = grad_field[::quiver_step, ::quiver_step, :]   # (H', W', 2)
 
-        # Normalize to unit direction vectors; encode magnitude via alpha
-        mag  = np.sqrt(U**2 + V**2 + 1e-8)
-        Un   = np.where(np.isnan(U), np.nan, U / mag)
-        Vn   = np.where(np.isnan(V), np.nan, V / mag)
-
-        # Mask arrows at wall/NaN grid cells
+        # Mask wall/NaN cells before normalization
         val_q = values[::quiver_step, ::quiver_step]
-        Un = np.where(np.isnan(val_q), np.nan, Un)
-        Vn = np.where(np.isnan(val_q), np.nan, Vn)
+        gf_q = np.where(np.isnan(val_q)[..., None], np.nan, gf_q)
+
+        Un, Vn, g_mean, g_std = _normalize_grad(gf_q)
+
+        print(f'  [∇V diag] mag mean={g_mean:.4e}  std={g_std:.4e}')
 
         ax.quiver(Xq, Yq, Un, Vn,
                   color='crimson', alpha=0.70,
                   angles='xy', pivot='mid',
-                  scale=30, scale_units='inches',
-                  zorder=5, label='∇V(s,g)')
+                  scale=None,
+                  zorder=5,
+                  label=f'∇V(s,g)  (mean={g_mean:.2e}, std={g_std:.2e})')
 
     ax.scatter([gx], [gy], c='red', marker='*', s=500,
                edgecolors='white', linewidths=0.8,
