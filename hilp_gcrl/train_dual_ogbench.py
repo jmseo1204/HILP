@@ -38,6 +38,11 @@ from flax.core import unfreeze
 from absl import app, flags
 import tqdm
 import wandb
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from sklearn.manifold import TSNE
+from shapely.geometry import Point, box
+from shapely.ops import unary_union
 
 # ---- hilp_gcrl internal imports ---------------------------------------------
 _ROOT = Path(__file__).parent          # hilp_gcrl/
@@ -75,6 +80,111 @@ def restore_agent(agent, restore_path, restore_epoch):
     with open(path, 'rb') as f:
         load_dict = pickle.load(f)
     return flax.serialization.from_state_dict(agent, load_dict['agent'])
+
+
+# ======================== t-SNE Visualization ================================
+
+def _build_traversable_obs(env, obs_template):
+    """
+    Compute a list of non-wall (x, y) points and matching full observations
+    by sampling a fine grid over the maze.
+
+    Returns:
+        obs_array   : (N, obs_dim) float32 numpy array
+        xy_array    : (N, 2)       float32 numpy array of world coordinates
+    """
+    maze_map  = env.unwrapped.maze_map == 1
+    UNIT      = float(env.unwrapped._maze_unit)
+    ORIGIN_X  = -float(env.unwrapped._offset_x)
+    ORIGIN_Y  = -float(env.unwrapped._offset_y)
+    half      = UNIT / 2
+    num_rows, num_cols = len(maze_map), len(maze_map[0]) if len(maze_map) else 0
+
+    # Build shapely union of wall boxes
+    wall_polys = []
+    for r in range(num_rows):
+        for c in range(num_cols):
+            if maze_map[r][c]:
+                cx = ORIGIN_X + c * UNIT
+                cy = ORIGIN_Y + r * UNIT
+                wall_polys.append(box(cx - half, cy - half, cx + half, cy + half))
+    poly_union = unary_union(wall_polys) if wall_polys else None
+
+    # Sample a grid at UNIT/4 spacing
+    step = UNIT / 4
+    x_range = np.arange(ORIGIN_X - half + step / 2, ORIGIN_X + num_cols * UNIT - half, step)
+    y_range = np.arange(ORIGIN_Y - half + step / 2, ORIGIN_Y + num_rows * UNIT - half, step)
+
+    rest = np.asarray(obs_template[2:]) if obs_template.shape[0] > 2 else np.array([], dtype=np.float32)
+
+    obs_list, xy_list = [], []
+    for x in x_range:
+        for y in y_range:
+            if poly_union is not None and poly_union.intersects(Point(x, y)):
+                continue
+            obs_list.append(np.concatenate([[x, y], rest]))
+            xy_list.append([x, y])
+
+    if not obs_list:
+        return np.zeros((0, obs_template.shape[0]), dtype=np.float32), np.zeros((0, 2), dtype=np.float32)
+
+    return (np.array(obs_list, dtype=np.float32),
+            np.array(xy_list, dtype=np.float32))
+
+
+def generate_tsne_visualization(agent, obs_array, xy_array, step, seed, aggregator):
+    """
+    Run t-SNE on psi(s) and phi(g) embeddings for traversable maze states,
+    and return an (H, W, 3) uint8 image for WandB logging.
+
+    Left subplot  — psi(s)  colored by X coordinate
+    Right subplot — psi(s)  colored by Y coordinate
+    """
+    if obs_array.shape[0] <= 1:
+        print('  [t-SNE] Not enough traversable points — skipping.')
+        return np.zeros((800, 1600, 3), dtype=np.uint8)
+
+    # Compute psi(s) embeddings
+    chunk = 4096
+    psi_list = []
+    for i in range(0, obs_array.shape[0], chunk):
+        psi_list.append(np.array(agent.get_psi(obs_array[i:i + chunk])))
+    psi = np.concatenate(psi_list, axis=0)          # (N, skill_dim)
+
+    perplexity = float(min(30, psi.shape[0] - 1))
+    if perplexity <= 0:
+        perplexity = 5.0
+
+    print(f'  [t-SNE] Running on {psi.shape[0]} points (dim={psi.shape[1]}) ...')
+    tsne = TSNE(n_components=2, random_state=seed, perplexity=perplexity,
+                max_iter=300, init='pca', learning_rate='auto', n_jobs=-1)
+    try:
+        emb = tsne.fit_transform(psi)               # (N, 2)
+    except Exception as e:
+        print(f'  [t-SNE] Error: {e}')
+        return np.zeros((800, 1600, 3), dtype=np.uint8)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8), dpi=100)
+    fig.suptitle(f'psi(s) t-SNE   [aggregator={aggregator}   step={step:,}]', fontsize=13)
+
+    titles   = ['colored by X position', 'colored by Y position']
+    colors   = [xy_array[:, 0], xy_array[:, 1]]
+    clabels  = ['X coordinate', 'Y coordinate']
+    for ax, title, c, clabel in zip(axes, titles, colors, clabels):
+        sc = ax.scatter(emb[:, 0], emb[:, 1], c=c, cmap='viridis', s=6, alpha=0.8)
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04).set_label(clabel)
+        ax.set_title(title)
+        ax.set_xlabel('t-SNE dim 1')
+        ax.set_ylabel('t-SNE dim 2')
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+    fig.tight_layout()
+    canvas = FigureCanvas(fig)
+    canvas.draw()
+    w, h = canvas.get_width_height()
+    image = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[:, :, :3]
+    plt.close(fig)
+    return image
 
 
 # ======================== Network ============================================
@@ -279,7 +389,7 @@ def main(_):
                    config=FLAGS.flag_values_dict())
         print(f'[DualHILP] WandB run: {run_name}  project: {FLAGS.wandb_project}')
 
-    _, dataset, _ = ogbench.make_env_and_datasets(
+    env, dataset, _ = ogbench.make_env_and_datasets(
         FLAGS.env_name, compact_dataset=False)
 
     # Dataset: pass as plain dict so GCDataset can handle terminal_key
@@ -300,6 +410,11 @@ def main(_):
         reward_scale = 1.0,
         reward_shift = -1.0,   # rewards = success - 1
     )
+
+    # ---- Build traversable maze grid for t-SNE (done once) -----------------
+    obs_template = train_data['observations'][0]
+    viz_obs, viz_xy = _build_traversable_obs(env, obs_template)
+    print(f'[DualHILP] Traversable viz points: {viz_obs.shape[0]}')
 
     ex_obs = train_data['observations'][:1]
     ex_act = train_data['actions'][:1]
@@ -355,6 +470,14 @@ def main(_):
             if FLAGS.wandb_project:
                 wandb.log(log_info, step=step)
 
+        if FLAGS.viz_interval > 0 and step % FLAGS.viz_interval == 0:
+            if FLAGS.wandb_project and viz_obs.shape[0] > 0:
+                single_agent = jax.tree.map(lambda x: x[0], agent) if n_devices > 1 else agent
+                img = generate_tsne_visualization(
+                    single_agent, viz_obs, viz_xy, step, FLAGS.seed, FLAGS.aggregator)
+                wandb.log({'diagnostics/psi_tsne': wandb.Image(img)}, step=step)
+                tqdm.tqdm.write(f'[step {step:>8d}] Logged psi(s) t-SNE to WandB.')
+
         if step % FLAGS.save_interval == 0:
             save_agent(
                 jax.tree.map(lambda x: x[0], agent) if n_devices > 1 else agent,
@@ -378,6 +501,7 @@ if __name__ == '__main__':
     flags.DEFINE_integer('train_steps',    1000000, 'Total steps.')
     flags.DEFINE_integer('save_interval',  100000,  'Checkpoint interval.')
     flags.DEFINE_integer('log_interval',   1000,    'Log interval.')
+    flags.DEFINE_integer('viz_interval',   20000,   't-SNE viz interval. 0 = disabled.')
     flags.DEFINE_string ('save_dir',       'exp/dual_repr', 'Output dir.')
     flags.DEFINE_integer('seed',           0,       'Seed.')
     flags.DEFINE_float  ('p_currgoal',     0.0,     '')

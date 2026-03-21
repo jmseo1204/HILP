@@ -28,6 +28,7 @@ P_CURRGOAL=0.2
 P_TRAJGOAL=0.5
 P_RANDOMGOAL=0.3
 SAVE_INTERVAL=50000
+VIZ_INTERVAL=20000    # t-SNE logged to WandB every N steps (0 = disabled)
 
 PYTHON_SCRIPT="/workspace/HILP/hilp_gcrl/train_dual_ogbench.py"
 
@@ -129,6 +130,7 @@ docker run --gpus "${DEVICE}" --rm \
             --aggregator=${AGGREGATOR} \
             --resume_step=${RESUME_STEP} \
             --save_dir=${SAVE_DIR} \
+            --viz_interval=${VIZ_INTERVAL} \
             --wandb_project=${WANDB_PROJECT} \
             --wandb_run_name=${WANDB_RUN_NAME}
     "
