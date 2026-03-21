@@ -13,7 +13,6 @@ WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 UNAME="junjolp2026spring"
-DEVICE='"device=cpu"'
 
 # ---- Parameters -------------------------------------------------------------
 ENV_NAME="antmaze-giant-navigate-v0"
@@ -44,7 +43,7 @@ echo "  goal              : (${GOAL_X}, ${GOAL_Y})"
 echo "  output dir        : ${SAVE_DIR}"
 echo "============================================"
 
-docker run --gpus "${DEVICE}" --rm \
+docker run --rm \
     -v "${WORKSPACE_ROOT}:/workspace" \
     -v "${OGBENCH_DATA_DIR}:/home/${UNAME}/.ogbench/data" \
     -w /workspace/HILP/hilp_gcrl \
