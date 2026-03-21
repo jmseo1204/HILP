@@ -125,28 +125,24 @@ class DualHILP(flax.struct.PyTreeNode):
         (tq1, tq2) = self.network(
             batch['observations'], batch['goals'], batch['actions'],
             method='target_q')
-        q_bar = jnp.minimum(tq1, tq2)   # pessimistic
+        q_bar = jnp.minimum(tq1, tq2)   # pessimistic twin-Q target
 
-        # V(s, g) = psi(s)^T phi(g) — gradient flows through psi, phi
-        (v1, v2) = self.network(
+        # V(s, g) = psi(s)^T phi(g) — single pair, gradient flows through psi, phi
+        v = self.network(
             batch['observations'], batch['goals'],
             method='value', params=network_params)
-        v = (v1 + v2) / 2
 
         # Advantage for expectile weighting
-        # (q_bar uses stored target params → effectively stop_gradient)
         adv = q_bar - v
 
         # Expectile loss: push V toward the upper quantile of Q_bar
-        loss_v = (expectile_loss(adv, q_bar - v1, self.config['expectile']).mean() +
-                  expectile_loss(adv, q_bar - v2, self.config['expectile']).mean())
+        loss_v = expectile_loss(adv, q_bar - v, self.config['expectile']).mean()
 
         # ---- Q loss (Eq. 4): fit Q to r + gamma * V(s') ----
         # V(s', g) from current V (stop gradient — uses stored params, not network_params)
-        (nv1, nv2) = self.network(
+        next_v = self.network(
             batch['next_observations'], batch['goals'],
             method='value')
-        next_v = jnp.minimum(nv1, nv2)
         target_q_val = batch['rewards'] + self.config['discount'] * batch['masks'] * next_v
 
         # Q(s, a, g) — gradient flows through Q
@@ -158,17 +154,17 @@ class DualHILP(flax.struct.PyTreeNode):
         loss = loss_v + loss_q
 
         info = {
-            'value/value_loss': loss_v,
-            'value/q_loss':     loss_q,
-            'value/v_mean':     v.mean(),
-            'value/v_max':      v.max(),
-            'value/v_min':      v.min(),
-            'value/adv_mean':   adv.mean(),
+            'value/value_loss':  loss_v,
+            'value/q_loss':      loss_q,
+            'value/v_mean':      v.mean(),
+            'value/v_max':       v.max(),
+            'value/v_min':       v.min(),
+            'value/adv_mean':    adv.mean(),
             'value/accept_prob': (adv >= 0).mean(),
-            'value/q_bar_mean': q_bar.mean(),
-            'value/q_bar_max':  q_bar.max(),
-            'value/q_bar_min':  q_bar.min(),
-            'loss':             loss,
+            'value/q_bar_mean':  q_bar.mean(),
+            'value/q_bar_max':   q_bar.max(),
+            'value/q_bar_min':   q_bar.min(),
+            'loss':              loss,
         }
         return loss, info
 
@@ -218,7 +214,7 @@ class DualHILP(flax.struct.PyTreeNode):
             hidden_dims=tuple(value_hidden_dims),
             skill_dim=skill_dim,
             use_layer_norm=bool(use_layer_norm),
-            ensemble=True,
+            ensemble=False,  # paper: single (psi, phi) pair
         )
 
         # Q(s,a,g) = MLP([s, g, a]) — separate Q network (Algorithm 1)
