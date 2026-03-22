@@ -790,25 +790,26 @@ def main(_):
                       + '  '.join(f'{k}={v:.1f}ms' for k, v in summary.items()))
 
         # 일반 지표 누적 (neg per-step 제외)
+        # GPU sync를 피하기 위해 JAX 배열 그대로 누적, float 변환은 로깅 시점에만
         for k, v in info.items():
             if k not in _NEG_STEP_KEYS:
-                info_acc.setdefault(k, []).append(_extract(v))
+                info_acc.setdefault(k, []).append(v)
 
         # neg 지표는 active step일 때만 누적
         if is_active:
             for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_free_mean',
                       'neg/margin_mean', 'neg/violation_mean'):
-                neg_acc.setdefault(k, []).append(_extract(info[k]))
+                neg_acc.setdefault(k, []).append(info[k])
 
         if step % FLAGS.log_interval == 0:
-            log_info = {k: float(np.mean(vs)) for k, vs in info_acc.items()}
+            log_info = {k: float(np.mean([_extract(v) for v in vs])) for k, vs in info_acc.items()}
 
             log_info['neg/sample_count']    = neg_sample_count
             log_info['neg/sample_rate']     = neg_sample_count / FLAGS.log_interval
             log_info['neg/prohibited_size'] = prohibited_obs.shape[0] if prohibited_obs is not None else 0
             for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_free_mean',
                       'neg/margin_mean', 'neg/violation_mean'):
-                log_info[k + '_avg'] = float(np.mean(neg_acc[k])) if neg_acc.get(k) else float('nan')
+                log_info[k + '_avg'] = float(np.mean([_extract(v) for v in neg_acc[k]])) if neg_acc.get(k) else float('nan')
 
             log_str = '  '.join(
                 f'{k}={v:.4f}' for k, v in log_info.items()
