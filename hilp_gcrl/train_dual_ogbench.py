@@ -446,18 +446,13 @@ class DualHILP(flax.struct.PyTreeNode):
         #   psi(s_free)   — stop_gradient  (reference value, not updated)
         # neg_weight is 0.0 (inactive) or 1.0 (active) — keeps dict structure
         # constant across steps so JIT traces only once.
-        # neg_states + neg_free를 concat → 단일 forward pass (2x batch).
-        # 2번 따로 호출하는 것보다 kernel launch 비용 절감 + GPU 효율 향상.
-        # gradient는 앞쪽 절반(psi_neg)만 흐르고 뒤쪽(psi_free)은 stop_gradient.
-        _n = batch['neg_states'].shape[0]
-        _psi_both = self.network(
-            jnp.concatenate([batch['neg_states'], batch['neg_free']], axis=0),
-            method='phi', params=network_params)
-        psi_neg  = _psi_both[:_n]
-        psi_free = jax.lax.stop_gradient(_psi_both[_n:])
-
+        psi_neg = self.network(
+            batch['neg_states'], method='phi', params=network_params)
         phi_neg_goal = jax.lax.stop_gradient(
             self.network(batch['neg_goals'], method='phi_goal', params=network_params))
+        # stored params → gradient tape 외부, activation 저장 불필요.
+        # 한 step 이전 params이나 reference value이므로 허용.
+        psi_free = self.network(batch['neg_free'], method='phi')
 
         if self.config['aggregator'] == 'neg_l2':
             sq_neg  = ((psi_neg  - phi_neg_goal) ** 2).sum(axis=-1)
@@ -708,7 +703,7 @@ def main(_):
         obs_dim = batch['observations'].shape[1]
         active = (prohibited_obs is not None
                   and np.random.rand() < FLAGS.p_prohibit)
-        if active:
+        if active and prohibited_obs is not None and neg_nearest_free is not None and neg_spatial_margins is not None:
             neg_idx  = np.random.randint(prohibited_obs.shape[0], size=n)
             goal_idx = np.random.randint(all_obs.shape[0], size=n)
             batch['neg_states']  = prohibited_obs[neg_idx].astype(np.float32)
@@ -760,8 +755,9 @@ def main(_):
         _t3 = time.perf_counter()
 
         agent, info = train_step(agent, batch)
-        # JAX 비동기 디스패치 → info의 실제 값이 준비될 때까지 대기 (GPU 완료 시점)
-        jax.tree.map(lambda x: x.block_until_ready(), info)
+        if _profiling:
+            # 프로파일링 중에만 GPU 동기화 (정확한 t_train 측정용)
+            jax.tree.map(lambda x: x.block_until_ready(), info)
         _t4 = time.perf_counter()
 
         _t_step1 = time.perf_counter()
