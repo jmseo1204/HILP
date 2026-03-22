@@ -446,14 +446,18 @@ class DualHILP(flax.struct.PyTreeNode):
         #   psi(s_free)   — stop_gradient  (reference value, not updated)
         # neg_weight is 0.0 (inactive) or 1.0 (active) — keeps dict structure
         # constant across steps so JIT traces only once.
-        psi_neg = self.network(
-            batch['neg_states'], method='phi', params=network_params)
+        # neg_states + neg_free를 concat → 단일 forward pass (2x batch).
+        # 2번 따로 호출하는 것보다 kernel launch 비용 절감 + GPU 효율 향상.
+        # gradient는 앞쪽 절반(psi_neg)만 흐르고 뒤쪽(psi_free)은 stop_gradient.
+        _n = batch['neg_states'].shape[0]
+        _psi_both = self.network(
+            jnp.concatenate([batch['neg_states'], batch['neg_free']], axis=0),
+            method='phi', params=network_params)
+        psi_neg  = _psi_both[:_n]
+        psi_free = jax.lax.stop_gradient(_psi_both[_n:])
+
         phi_neg_goal = jax.lax.stop_gradient(
             self.network(batch['neg_goals'], method='phi_goal', params=network_params))
-        # stored params 사용 → gradient tape 완전히 외부.
-        # stop_gradient 불필요 (network_params에 의존하지 않음).
-        # 한 step 이전 params를 쓰나, reference value이므로 허용 가능.
-        psi_free = self.network(batch['neg_free'], method='phi')
 
         if self.config['aggregator'] == 'neg_l2':
             sq_neg  = ((psi_neg  - phi_neg_goal) ** 2).sum(axis=-1)
