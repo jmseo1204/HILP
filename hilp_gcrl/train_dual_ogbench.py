@@ -64,23 +64,18 @@ FLAGS = flags.FLAGS
 
 def save_agent(agent, save_dir, step):
     os.makedirs(save_dir, exist_ok=True)
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path = os.path.join(save_dir, f'params_{step}_{ts}.pkl')
+    # 기존 체크포인트 삭제 (최신 1개만 유지)
+    for old in glob.glob(os.path.join(save_dir, 'params_*.pkl')):
+        os.remove(old)
+    path = os.path.join(save_dir, f'params_{step}.pkl')
     with open(path, 'wb') as f:
         pickle.dump({'agent': flax.serialization.to_state_dict(agent)}, f)
     print(f'Saved → {path}')
 
 
 def restore_agent(agent, restore_dir, restore_epoch):
-    pattern = os.path.join(restore_dir, f'params_{restore_epoch}_*.pkl')
-    candidates = glob.glob(pattern)
-    # Fall back to legacy filename without timestamp
-    if not candidates:
-        legacy = os.path.join(restore_dir, f'params_{restore_epoch}.pkl')
-        if os.path.exists(legacy):
-            candidates = [legacy]
-    assert len(candidates) >= 1, f'No checkpoint found for step {restore_epoch} in {restore_dir}'
-    path = sorted(candidates)[-1]   # use latest timestamp if multiple exist
+    path = os.path.join(restore_dir, f'params_{restore_epoch}.pkl')
+    assert os.path.exists(path), f'No checkpoint found for step {restore_epoch} in {restore_dir}'
     with open(path, 'rb') as f:
         load_dict = pickle.load(f)
     print(f'Restored ← {path}')

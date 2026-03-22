@@ -99,10 +99,8 @@ if [ "${PHASE_CHOICE}" == "1" ]; then
             echo ""
             echo "Existing checkpoints detected (aggregator=${AGGREGATOR}):"
             for i in "${!CKPT_FILES[@]}"; do
-                BASE=$(basename "${CKPT_FILES[$i]}" .pkl)
-                STEP=$(echo "${BASE}" | cut -d_ -f2)
-                TS=$(echo "${BASE}" | cut -d_ -f3-)
-                echo "  [$((i+1))] step ${STEP}  (${TS})"
+                STEP=$(basename "${CKPT_FILES[$i]}" .pkl | cut -d_ -f2)
+                echo "  [$((i+1))] step ${STEP}"
             done
             echo "  [f] Start from scratch (existing checkpoints will be kept)"
             echo ""
@@ -203,11 +201,9 @@ if [ "${PHASE_CHOICE}" == "2" ]; then
     echo ""
     echo "Phase 1 checkpoints available:"
     for i in "${!P1_CKPTS[@]}"; do
-        BASE=$(basename "${P1_CKPTS[$i]}" .pkl)
-        STEP=$(echo "${BASE}" | cut -d_ -f2)
-        TS=$(echo "${BASE}" | cut -d_ -f3-)
+        STEP=$(basename "${P1_CKPTS[$i]}" .pkl | cut -d_ -f2)
         AGGR=$(basename "$(dirname "${P1_CKPTS[$i]}")")
-        echo "  [$((i+1))] step ${STEP}  (${TS})  [aggregator=${AGGR}]"
+        echo "  [$((i+1))] step ${STEP}  [aggregator=${AGGR}]"
     done
 
     DUAL_RESTORE_EPOCH=$(basename "${P1_CKPTS[-1]}" .pkl | cut -d_ -f2)
@@ -240,10 +236,8 @@ if [ "${PHASE_CHOICE}" == "2" ]; then
             echo ""
             echo "Existing Phase 2 checkpoints detected:"
             for i in "${!P2_CKPTS[@]}"; do
-                BASE=$(basename "${P2_CKPTS[$i]}" .pkl)
-                STEP=$(echo "${BASE}" | cut -d_ -f2)
-                TS=$(echo "${BASE}" | cut -d_ -f3-)
-                echo "  [$((i+1))] step ${STEP}  (${TS})"
+                STEP=$(basename "${P2_CKPTS[$i]}" .pkl | cut -d_ -f2)
+                echo "  [$((i+1))] step ${STEP}"
             done
             echo "  [f] Start from scratch (existing checkpoints will be kept)"
             echo ""
