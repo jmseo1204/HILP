@@ -437,52 +437,42 @@ class DualHILP(flax.struct.PyTreeNode):
         }
 
         # ---- Prohibited-zone contrastive margin loss (V-only) ---------------
-        # Enforces V(s_neg, g) < V(s_free, g) - margin  (relative ordering).
-        # s_free  = nearest feasible neighbor of s_neg (precomputed by xy KD-tree).
-        # margin  = spatial xy-distance between s_neg and s_free (per-sample).
-        # Gradient flow:
-        #   psi(s_neg)    — updated  (only the prohibited-state encoder moves)
-        #   phi(neg_goal) — stop_gradient  (goal encoder unchanged)
-        #   psi(s_free)   — stop_gradient  (reference value, not updated)
-        # jax.lax.cond: inactive step(neg_w=0)에서 3개 forward pass를 런타임에 스킵.
-        neg_w = jnp.squeeze(batch['neg_weight'])   # scalar 0.0 or 1.0
-
-        use_neg_l2 = (self.config['aggregator'] == 'neg_l2')  # trace-time constant
-
-        def _compute_neg(_):
+        # use_neg는 Python bool (trace-time static) — False면 이 블록 전체가
+        # XLA 프로그램에서 제거됨 (forward pass 3개 없음).
+        if self.config['use_neg']:
+            # Enforces V(s_neg, g) < V(s_free, g) - margin  (relative ordering).
+            # s_free  = nearest feasible neighbor of s_neg (precomputed by xy KD-tree).
+            # margin  = spatial xy-distance between s_neg and s_free (per-sample).
+            # Gradient flow:
+            #   psi(s_neg)    — updated
+            #   phi(neg_goal) — stop_gradient
+            #   psi(s_free)   — stop_gradient (stored params, reference only)
             psi_neg = self.network(
                 batch['neg_states'], method='phi', params=network_params)
-            phi_ng = jax.lax.stop_gradient(
+            phi_neg_goal = jax.lax.stop_gradient(
                 self.network(batch['neg_goals'], method='phi_goal', params=network_params))
-            psi_fr = self.network(batch['neg_free'], method='phi')
-            if use_neg_l2:
-                sq_n = ((psi_neg - phi_ng) ** 2).sum(axis=-1)
-                sq_f = ((psi_fr  - phi_ng) ** 2).sum(axis=-1)
-                v_n = -jnp.sqrt(jnp.maximum(sq_n, 1e-6))
-                v_f = -jnp.sqrt(jnp.maximum(sq_f, 1e-6))
+            psi_free = self.network(batch['neg_free'], method='phi')
+
+            if self.config['aggregator'] == 'neg_l2':
+                sq_neg  = ((psi_neg  - phi_neg_goal) ** 2).sum(axis=-1)
+                sq_free = ((psi_free - phi_neg_goal) ** 2).sum(axis=-1)
+                v_neg  = -jnp.sqrt(jnp.maximum(sq_neg,  1e-6))
+                v_free = -jnp.sqrt(jnp.maximum(sq_free, 1e-6))
             else:
-                v_n = (psi_neg * phi_ng).sum(axis=-1)
-                v_f = (psi_fr  * phi_ng).sum(axis=-1)
-            mg = self.config['margin_scale'] * batch['neg_margins']
-            viol = jnp.maximum(v_n - v_f + mg, 0.0)
-            return (viol ** 2).mean(), v_n.mean(), v_f.mean(), mg.mean(), viol.mean()
+                v_neg  = (psi_neg  * phi_neg_goal).sum(axis=-1)
+                v_free = (psi_free * phi_neg_goal).sum(axis=-1)
 
-        def _skip_neg(_):
-            z = jnp.zeros(())
-            return z, z, z, z, z
+            margin    = self.config['margin_scale'] * batch['neg_margins']
+            violation = jnp.maximum(v_neg - v_free + margin, 0.0)
+            loss_neg  = (violation ** 2).mean()
+            loss = loss + self.config['lambda_neg'] * loss_neg
 
-        loss_neg, v_neg_mean, v_free_mean, margin_mean, violation_mean = jax.lax.cond(
-            neg_w > 0, _compute_neg, _skip_neg, operand=None)
+            info['neg/loss_raw']       = loss_neg
+            info['neg/v_neg_mean']     = v_neg.mean()
+            info['neg/v_free_mean']    = v_free.mean()
+            info['neg/margin_mean']    = margin.mean()
+            info['neg/violation_mean'] = violation.mean()
 
-        loss = loss + self.config['lambda_neg'] * neg_w * loss_neg
-
-        info['neg/loss_weighted']    = loss_neg * neg_w
-        info['neg/loss_raw']         = loss_neg
-        info['neg/v_neg_mean']       = v_neg_mean
-        info['neg/v_free_mean']      = v_free_mean
-        info['neg/margin_mean']      = margin_mean
-        info['neg/violation_mean']   = violation_mean
-        info['neg/active']           = neg_w
         info['loss'] = loss
         return loss, info
 
@@ -570,7 +560,8 @@ class DualHILP(flax.struct.PyTreeNode):
                    config=flax.core.FrozenDict(
                        discount=discount, tau=tau, expectile=expectile,
                        skill_dim=skill_dim, aggregator=aggregator,
-                       lambda_neg=lambda_neg, margin_scale=margin_scale))
+                       lambda_neg=lambda_neg, margin_scale=margin_scale,
+                       use_neg=False))   # use_neg은 train_step 선택으로 제어
 
 
 # ======================== Main ===============================================
@@ -685,16 +676,33 @@ def main(_):
         print(f'[DualHILP] Resumed from step {FLAGS.resume_step}, continuing from step {start_step}')
 
     # ---- Build train_step (pmap for multi-GPU, jit for single GPU) ----------
+    # neg loss 유무에 따라 별도의 XLA 프로그램으로 컴파일.
+    # use_neg=True/False는 trace-time static → inactive step에서 forward pass 3개 완전 제거.
+    agent_neg    = agent.replace(config=flax.core.FrozenDict({**agent.config, 'use_neg': True}))
+    agent_no_neg = agent.replace(config=flax.core.FrozenDict({**agent.config, 'use_neg': False}))
+
     if n_devices > 1:
-        agent = jax.device_put_replicated(agent, jax.local_devices())
+        agent_neg    = jax.device_put_replicated(agent_neg,    jax.local_devices())
+        agent_no_neg = jax.device_put_replicated(agent_no_neg, jax.local_devices())
 
         @functools.partial(jax.pmap, axis_name='batch')
-        def train_step(agent, batch):
+        def train_step_neg(agent, batch):
+            return agent.update(batch, pmap_axis='batch')
+
+        @functools.partial(jax.pmap, axis_name='batch')
+        def train_step_no_neg(agent, batch):
             return agent.update(batch, pmap_axis='batch')
     else:
         @jax.jit
-        def train_step(agent, batch):
+        def train_step_neg(agent, batch):
             return agent.update(batch)
+
+        @jax.jit
+        def train_step_no_neg(agent, batch):
+            return agent.update(batch)
+
+    # 현재 agent를 neg/no_neg 버전으로 시작
+    agent = agent_no_neg
 
     # ---- Negative sampling helper -------------------------------------------
     def _inject_neg_samples(batch):
@@ -728,7 +736,7 @@ def main(_):
     # ---- Training loop ------------------------------------------------------
     # 모든 지표를 interval mean으로 로깅
     # neg 지표 중 per-step 의미 없는 것들은 active step만 별도 누적
-    _NEG_STEP_KEYS = {'neg/active', 'neg/loss_raw', 'neg/loss_weighted',
+    _NEG_STEP_KEYS = {'neg/loss_raw',
                       'neg/v_neg_mean', 'neg/v_free_mean',
                       'neg/margin_mean', 'neg/violation_mean'}
     neg_sample_count = 0
@@ -762,7 +770,14 @@ def main(_):
             batch = shard_batch(batch)
         _t3 = time.perf_counter()
 
-        agent, info = train_step(agent, batch)
+        if is_active:
+            # neg forward pass 포함 XLA 프로그램 (use_neg=True로 컴파일됨)
+            agent_neg    = agent_neg.replace(   network=agent.network)
+            agent_neg, info = train_step_neg(agent_neg, batch)
+            agent        = agent_no_neg.replace(network=agent_neg.network)
+        else:
+            agent, info  = train_step_no_neg(agent, batch)
+            agent_neg    = agent_neg.replace(   network=agent.network)
         if _profiling:
             # 프로파일링 중에만 GPU 동기화 (정확한 t_train 측정용)
             jax.tree.map(lambda x: x.block_until_ready(), info)
