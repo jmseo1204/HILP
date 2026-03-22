@@ -444,39 +444,45 @@ class DualHILP(flax.struct.PyTreeNode):
         #   psi(s_neg)    — updated  (only the prohibited-state encoder moves)
         #   phi(neg_goal) — stop_gradient  (goal encoder unchanged)
         #   psi(s_free)   — stop_gradient  (reference value, not updated)
-        # neg_weight is 0.0 (inactive) or 1.0 (active) — keeps dict structure
-        # constant across steps so JIT traces only once.
-        psi_neg = self.network(
-            batch['neg_states'], method='phi', params=network_params)
-        phi_neg_goal = jax.lax.stop_gradient(
-            self.network(batch['neg_goals'], method='phi_goal', params=network_params))
-        # stored params → gradient tape 외부, activation 저장 불필요.
-        # 한 step 이전 params이나 reference value이므로 허용.
-        psi_free = self.network(batch['neg_free'], method='phi')
+        # jax.lax.cond: inactive step(neg_w=0)에서 3개 forward pass를 런타임에 스킵.
+        neg_w = jnp.squeeze(batch['neg_weight'])   # scalar 0.0 or 1.0
 
-        if self.config['aggregator'] == 'neg_l2':
-            sq_neg  = ((psi_neg  - phi_neg_goal) ** 2).sum(axis=-1)
-            sq_free = ((psi_free - phi_neg_goal) ** 2).sum(axis=-1)
-            v_neg  = -jnp.sqrt(jnp.maximum(sq_neg,  1e-6))
-            v_free = -jnp.sqrt(jnp.maximum(sq_free, 1e-6))
-        else:  # inner_prod
-            v_neg  = (psi_neg  * phi_neg_goal).sum(axis=-1)
-            v_free = (psi_free * phi_neg_goal).sum(axis=-1)
+        use_neg_l2 = (self.config['aggregator'] == 'neg_l2')  # trace-time constant
 
-        # margin per sample: margin_scale * spatial_dist(s_neg, s_free)
-        margin = self.config['margin_scale'] * batch['neg_margins']   # (n,)
-        violation = jnp.maximum(v_neg - v_free + margin, 0.0)
-        loss_neg = (violation ** 2).mean()
-        neg_w = jnp.squeeze(batch['neg_weight'])
+        def _compute_neg(_):
+            psi_neg = self.network(
+                batch['neg_states'], method='phi', params=network_params)
+            phi_ng = jax.lax.stop_gradient(
+                self.network(batch['neg_goals'], method='phi_goal', params=network_params))
+            psi_fr = self.network(batch['neg_free'], method='phi')
+            if use_neg_l2:
+                sq_n = ((psi_neg - phi_ng) ** 2).sum(axis=-1)
+                sq_f = ((psi_fr  - phi_ng) ** 2).sum(axis=-1)
+                v_n = -jnp.sqrt(jnp.maximum(sq_n, 1e-6))
+                v_f = -jnp.sqrt(jnp.maximum(sq_f, 1e-6))
+            else:
+                v_n = (psi_neg * phi_ng).sum(axis=-1)
+                v_f = (psi_fr  * phi_ng).sum(axis=-1)
+            mg = self.config['margin_scale'] * batch['neg_margins']
+            viol = jnp.maximum(v_n - v_f + mg, 0.0)
+            return (viol ** 2).mean(), v_n.mean(), v_f.mean(), mg.mean(), viol.mean()
+
+        def _skip_neg(_):
+            z = jnp.zeros(())
+            return z, z, z, z, z
+
+        loss_neg, v_neg_mean, v_free_mean, margin_mean, violation_mean = jax.lax.cond(
+            neg_w > 0, _compute_neg, _skip_neg, operand=None)
+
         loss = loss + self.config['lambda_neg'] * neg_w * loss_neg
 
         info['neg/loss_weighted']    = loss_neg * neg_w
-        info['neg/loss_raw']         = loss_neg          # 0이면 margin constraint 충족
-        info['neg/v_neg_mean']       = v_neg.mean()      # 낮아야 정상
-        info['neg/v_free_mean']      = v_free.mean()     # 기준값 (reference)
-        info['neg/margin_mean']      = margin.mean()     # 평균 spatial margin
-        info['neg/violation_mean']   = violation.mean()  # 0에 가까울수록 constraint 충족
-        info['neg/active']           = neg_w             # 이 step이 active였는지 (0 or 1)
+        info['neg/loss_raw']         = loss_neg
+        info['neg/v_neg_mean']       = v_neg_mean
+        info['neg/v_free_mean']      = v_free_mean
+        info['neg/margin_mean']      = margin_mean
+        info['neg/violation_mean']   = violation_mean
+        info['neg/active']           = neg_w
         info['loss'] = loss
         return loss, info
 
@@ -748,6 +754,8 @@ def main(_):
         _t1 = time.perf_counter()
 
         batch, is_active = _inject_neg_samples(batch)
+        if is_active:
+            neg_sample_count += 1
         _t2 = time.perf_counter()
 
         if n_devices > 1:
