@@ -25,7 +25,9 @@ import functools
 import os
 import sys
 import glob
+import json
 import pickle
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -628,15 +630,26 @@ def main(_):
         else:
             # Precompute nearest feasible (dataset) neighbor for each prohibited point.
             # Uses xy only (first 2 dims) to match _build_prohibited_obs logic.
+            _t_pre0 = time.perf_counter()
             feasible_xy = all_obs[:, :2].astype(np.float64)
             prohib_xy   = prohibited_obs[:, :2].astype(np.float64)
+            _t_pre1 = time.perf_counter()
             tree_feasible = KDTree(feasible_xy)
+            _t_pre2 = time.perf_counter()
             dists, idxs = tree_feasible.query(prohib_xy, workers=-1)
+            _t_pre3 = time.perf_counter()
             neg_nearest_free    = all_obs[idxs].astype(np.float32)   # (N_prohibited, obs_dim)
             neg_spatial_margins = dists.astype(np.float32)            # (N_prohibited,)
+            _t_pre4 = time.perf_counter()
             print(f'[DualHILP] Spatial margins — min={neg_spatial_margins.min():.3f}  '
                   f'mean={neg_spatial_margins.mean():.3f}  '
                   f'max={neg_spatial_margins.max():.3f}')
+            print(f'[PROFILE/precompute] xy_cast={_t_pre1-_t_pre0:.3f}s  '
+                  f'kdtree_build={_t_pre2-_t_pre1:.3f}s  '
+                  f'kdtree_query={_t_pre3-_t_pre2:.3f}s  '
+                  f'index_gather={_t_pre4-_t_pre3:.3f}s  '
+                  f'total={_t_pre4-_t_pre0:.3f}s  '
+                  f'n_feasible={feasible_xy.shape[0]}  n_prohib={prohib_xy.shape[0]}')
 
     ex_obs = train_data['observations'][:1]
     ex_act = train_data['actions'][:1]
@@ -716,14 +729,63 @@ def main(_):
     neg_acc     = {}   # neg 지표: active step만 누적
     _extract    = (lambda v: float(v[0])) if n_devices > 1 else float
 
+    # ---- Profiling setup ----------------------------------------------------
+    _PROFILE_LOG   = os.path.join(FLAGS.save_dir, 'timing_profile.jsonl')
+    _PROFILE_STEPS = 200          # 처음 200 step 기록 (JIT 컴파일 포함 구간 커버)
+    _timing_acc    = {}           # phase → list[float]
+    _profiling     = True         # False 가 되면 기록 중단
+    os.makedirs(FLAGS.save_dir, exist_ok=True)
+    _prof_f = open(_PROFILE_LOG, 'w')
+    print(f'[PROFILE] Timing log → {_PROFILE_LOG}')
+
     for step in tqdm.tqdm(range(start_step, FLAGS.train_steps + 1),
                           smoothing=0.1, dynamic_ncols=True):
+        _t_step0 = time.perf_counter()
+
+        _t0 = time.perf_counter()
         batch = gc_dataset.sample(FLAGS.batch_size)
+        _t1 = time.perf_counter()
+
         batch, is_active = _inject_neg_samples(batch)
-        neg_sample_count += int(is_active)
+        _t2 = time.perf_counter()
+
         if n_devices > 1:
             batch = shard_batch(batch)
+        _t3 = time.perf_counter()
+
         agent, info = train_step(agent, batch)
+        # JAX는 비동기 디스패치 → block_until_ready로 실제 GPU 완료 시점 측정
+        jax.effects_barrier() if hasattr(jax, 'effects_barrier') else jax.random.PRNGKey(0).block_until_ready()
+        _t4 = time.perf_counter()
+
+        _t_step1 = time.perf_counter()
+
+        if _profiling:
+            _rec = {
+                'step':        step,
+                'is_active':   bool(is_active),
+                'n_devices':   n_devices,
+                't_sample_ms': round((_t1 - _t0)          * 1000, 3),
+                't_inject_ms': round((_t2 - _t1)          * 1000, 3),
+                't_shard_ms':  round((_t3 - _t2)          * 1000, 3),
+                't_train_ms':  round((_t4 - _t3)          * 1000, 3),
+                't_total_ms':  round((_t_step1 - _t_step0)* 1000, 3),
+            }
+            _prof_f.write(json.dumps(_rec) + '\n')
+            _prof_f.flush()
+
+            for k, v in _rec.items():
+                if k.startswith('t_'):
+                    _timing_acc.setdefault(k, []).append(v)
+
+            if step - start_step >= _PROFILE_STEPS:
+                summary = {k: round(sum(vs) / len(vs), 3) for k, vs in _timing_acc.items()}
+                _prof_f.write(json.dumps({'step': 'SUMMARY_AVG', **summary}) + '\n')
+                _prof_f.flush()
+                _prof_f.close()
+                _profiling = False
+                print(f'[PROFILE] avg over {_PROFILE_STEPS} steps: '
+                      + '  '.join(f'{k}={v:.1f}ms' for k, v in summary.items()))
 
         # 일반 지표 누적 (neg per-step 제외)
         for k, v in info.items():
@@ -777,6 +839,8 @@ def main(_):
                 jax.tree.map(lambda x: x[0], agent) if n_devices > 1 else agent,
                 FLAGS.save_dir, step)
 
+    if _profiling:   # 학습이 _PROFILE_STEPS 전에 끝났을 경우 파일 닫기
+        _prof_f.close()
     print('[DualHILP] Training complete.')
     if FLAGS.wandb_project:
         wandb.finish()
