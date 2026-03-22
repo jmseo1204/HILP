@@ -450,8 +450,10 @@ class DualHILP(flax.struct.PyTreeNode):
             batch['neg_states'], method='phi', params=network_params)
         phi_neg_goal = jax.lax.stop_gradient(
             self.network(batch['neg_goals'], method='phi_goal', params=network_params))
-        psi_free = jax.lax.stop_gradient(
-            self.network(batch['neg_free'], method='phi', params=network_params))
+        # stored params 사용 → gradient tape 완전히 외부.
+        # stop_gradient 불필요 (network_params에 의존하지 않음).
+        # 한 step 이전 params를 쓰나, reference value이므로 허용 가능.
+        psi_free = self.network(batch['neg_free'], method='phi')
 
         if self.config['aggregator'] == 'neg_l2':
             sq_neg  = ((psi_neg  - phi_neg_goal) ** 2).sum(axis=-1)
@@ -754,8 +756,8 @@ def main(_):
         _t3 = time.perf_counter()
 
         agent, info = train_step(agent, batch)
-        # JAX는 비동기 디스패치 → block_until_ready로 실제 GPU 완료 시점 측정
-        jax.effects_barrier() if hasattr(jax, 'effects_barrier') else jax.random.PRNGKey(0).block_until_ready()
+        # JAX 비동기 디스패치 → info의 실제 값이 준비될 때까지 대기 (GPU 완료 시점)
+        jax.tree.map(lambda x: x.block_until_ready(), info)
         _t4 = time.perf_counter()
 
         _t_step1 = time.perf_counter()
