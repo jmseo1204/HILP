@@ -105,7 +105,7 @@ if [ "${VIZ_MODE}" = "dual_repr" ]; then
     echo ""
     echo "Available dual_repr checkpoints:"
     for i in "${!CKPT_FILES[@]}"; do
-        STEP=$(basename "${CKPT_FILES[$i]}" .pkl | sed 's/params_//')
+        STEP=$(basename "${CKPT_FILES[$i]}" .pkl | cut -d_ -f2)
         echo "  [$((i+1))] step ${STEP}"
     done
     read -rp "Your choice: " CKPT_CHOICE
@@ -113,7 +113,7 @@ if [ "${VIZ_MODE}" = "dual_repr" ]; then
     if [[ "$CKPT_CHOICE" =~ ^[0-9]+$ ]] && \
        [ "$CKPT_CHOICE" -ge 1 ] && [ "$CKPT_CHOICE" -le "${#CKPT_FILES[@]}" ]; then
         IDX=$((CKPT_CHOICE-1))
-        RESTORE_EPOCH=$(basename "${CKPT_FILES[$IDX]}" .pkl | sed 's/params_//')
+        RESTORE_EPOCH=$(basename "${CKPT_FILES[$IDX]}" .pkl | cut -d_ -f2)
         echo "→ Dual repr checkpoint: step ${RESTORE_EPOCH}"
     else
         echo "Invalid choice. Aborting."
@@ -167,7 +167,7 @@ else
     echo ""
     echo "Available GCVF (phase-2) checkpoints:"
     for i in "${!GCVF_FILES[@]}"; do
-        STEP=$(basename "${GCVF_FILES[$i]}" .pkl | sed 's/params_//')
+        STEP=$(basename "${GCVF_FILES[$i]}" .pkl | cut -d_ -f2)
         echo "  [$((i+1))] step ${STEP}"
     done
     read -rp "Your choice: " GCVF_CHOICE
@@ -175,7 +175,7 @@ else
     if [[ "$GCVF_CHOICE" =~ ^[0-9]+$ ]] && \
        [ "$GCVF_CHOICE" -ge 1 ] && [ "$GCVF_CHOICE" -le "${#GCVF_FILES[@]}" ]; then
         IDX=$((GCVF_CHOICE-1))
-        RESTORE_EPOCH=$(basename "${GCVF_FILES[$IDX]}" .pkl | sed 's/params_//')
+        RESTORE_EPOCH=$(basename "${GCVF_FILES[$IDX]}" .pkl | cut -d_ -f2)
         echo "→ GCVF checkpoint: step ${RESTORE_EPOCH}"
     else
         echo "Invalid choice. Aborting."
@@ -201,7 +201,7 @@ else
     echo ""
     echo "Available dual_repr (phase-1) checkpoints for phi(g):"
     for i in "${!DUAL_FILES[@]}"; do
-        STEP=$(basename "${DUAL_FILES[$i]}" .pkl | sed 's/params_//')
+        STEP=$(basename "${DUAL_FILES[$i]}" .pkl | cut -d_ -f2)
         echo "  [$((i+1))] step ${STEP}"
     done
     read -rp "Your choice: " DUAL_CHOICE
@@ -209,7 +209,7 @@ else
     if [[ "$DUAL_CHOICE" =~ ^[0-9]+$ ]] && \
        [ "$DUAL_CHOICE" -ge 1 ] && [ "$DUAL_CHOICE" -le "${#DUAL_FILES[@]}" ]; then
         IDX=$((DUAL_CHOICE-1))
-        DUAL_RESTORE_EPOCH=$(basename "${DUAL_FILES[$IDX]}" .pkl | sed 's/params_//')
+        DUAL_RESTORE_EPOCH=$(basename "${DUAL_FILES[$IDX]}" .pkl | cut -d_ -f2)
         echo "→ Dual repr checkpoint: step ${DUAL_RESTORE_EPOCH}"
     else
         echo "Invalid choice. Aborting."

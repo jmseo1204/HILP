@@ -64,18 +64,23 @@ FLAGS = flags.FLAGS
 
 def save_agent(agent, save_dir, step):
     os.makedirs(save_dir, exist_ok=True)
-    # 기존 체크포인트 삭제 (최신 1개만 유지)
-    for old in glob.glob(os.path.join(save_dir, 'params_*.pkl')):
-        os.remove(old)
-    path = os.path.join(save_dir, f'params_{step}.pkl')
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(save_dir, f'params_{step}_{ts}.pkl')
     with open(path, 'wb') as f:
         pickle.dump({'agent': flax.serialization.to_state_dict(agent)}, f)
     print(f'Saved → {path}')
 
 
 def restore_agent(agent, restore_dir, restore_epoch):
-    path = os.path.join(restore_dir, f'params_{restore_epoch}.pkl')
-    assert os.path.exists(path), f'No checkpoint found for step {restore_epoch} in {restore_dir}'
+    pattern = os.path.join(restore_dir, f'params_{restore_epoch}_*.pkl')
+    candidates = glob.glob(pattern)
+    # Fall back to legacy filename without timestamp
+    if not candidates:
+        legacy = os.path.join(restore_dir, f'params_{restore_epoch}.pkl')
+        if os.path.exists(legacy):
+            candidates = [legacy]
+    assert len(candidates) >= 1, f'No checkpoint found for step {restore_epoch} in {restore_dir}'
+    path = sorted(candidates)[-1]   # use latest timestamp if multiple exist
     with open(path, 'rb') as f:
         load_dict = pickle.load(f)
     print(f'Restored ← {path}')
@@ -185,6 +190,116 @@ def generate_tsne_visualization(agent, obs_array, xy_array, step, seed, aggregat
     image = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[:, :, :3]
     plt.close(fig)
     return image
+
+
+def generate_heatmap_visualization(agent, env, obs_template, step, aggregator,
+                                   gx=17.0, gy=12.0, grid_res=80):
+    """
+    V(s,g) heatmap + ∇_s V gradient field for WandB logging.
+    Returns (H, W, 3) uint8 image.
+    """
+    # Maze geometry
+    try:
+        maze_map = env.unwrapped.maze_map
+        UNIT  = float(env.unwrapped._maze_unit)
+        OFF_X = -float(env.unwrapped._offset_x)
+        OFF_Y = -float(env.unwrapped._offset_y)
+        mh, mw = len(maze_map), len(maze_map[0])
+        xmin = OFF_X - UNIT / 2;  xmax = OFF_X + (mw - 1) * UNIT + UNIT / 2
+        ymin = OFF_Y - UNIT / 2;  ymax = OFF_Y + (mh - 1) * UNIT + UNIT / 2
+        has_maze = True
+    except Exception:
+        xy = obs_template[:2]
+        xmin, ymin = xy - 6.0;  xmax, ymax = xy + 6.0
+        maze_map = None;  has_maze = False
+
+    # Build observation grid
+    xs = np.linspace(xmin, xmax, grid_res)
+    ys = np.linspace(ymin, ymax, grid_res)
+    X, Y = np.meshgrid(xs, ys)
+    ref = obs_template.copy().astype(np.float32)
+    obs_batch = np.tile(ref, (X.size, 1))
+    obs_batch[:, :2] = np.stack([X.ravel(), Y.ravel()], axis=-1)
+
+    # phi(goal)
+    goal_obs = ref.copy();  goal_obs[:2] = [gx, gy]
+    phi_g = np.array(agent.get_phi_goal(goal_obs[None]))  # (1, D)
+    phi_g_jnp = jnp.array(phi_g[0])                       # (D,)
+
+    # Batched value
+    @jax.jit
+    def _value_batch(obs):
+        psi_s = agent.get_psi(obs)
+        phi_rep = jnp.tile(phi_g_jnp[None], (psi_s.shape[0], 1))
+        if aggregator == 'neg_l2':
+            return -jnp.sqrt(jnp.maximum(((psi_s - phi_rep) ** 2).sum(-1), 1e-6))
+        return (psi_s * phi_rep).sum(-1)
+
+    chunk = 4096
+    values = np.concatenate(
+        [np.array(_value_batch(jnp.array(obs_batch[i:i + chunk])))
+         for i in range(0, obs_batch.shape[0], chunk)]
+    ).reshape(X.shape)
+
+    # Wall mask
+    if has_maze:
+        for i in range(X.shape[0]):
+            for j in range(X.shape[1]):
+                c = int(round((X[i, j] - OFF_X) / UNIT))
+                r = int(round((Y[i, j] - OFF_Y) / UNIT))
+                if not (0 <= r < mh and 0 <= c < mw) or maze_map[r][c] == 1:
+                    values[i, j] = np.nan
+
+    # Gradient field ∇_s V(s,g)
+    if aggregator == 'neg_l2':
+        def _scalar_v(obs):
+            psi = agent.network(obs[None], method='phi')[0]
+            return -jnp.sqrt(jnp.maximum(((psi - phi_g_jnp) ** 2).sum(), 1e-6))
+    else:
+        def _scalar_v(obs):
+            psi = agent.network(obs[None], method='phi')[0]
+            return (psi * phi_g_jnp).sum()
+
+    grad_fn = jax.jit(jax.vmap(jax.grad(_scalar_v)))
+    grads = np.concatenate(
+        [np.array(grad_fn(jnp.array(obs_batch[i:i + 2000])))[:, :2]
+         for i in range(0, obs_batch.shape[0], 2000)]
+    ).reshape(*X.shape, 2)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=120)
+    if has_maze:
+        try:
+            ax.imshow(1 - np.array(maze_map), cmap='gray',
+                      extent=(xmin, xmax, ymin, ymax),
+                      origin='lower', alpha=0.3)
+        except Exception:
+            pass
+    im = ax.pcolormesh(X, Y, values, shading='auto', cmap='viridis', alpha=0.80)
+    fig.colorbar(im, ax=ax, label='V(s,g)')
+
+    qs = max(1, grid_res // 25)
+    Xq = X[::qs, ::qs];  Yq = Y[::qs, ::qs]
+    U = grads[::qs, ::qs, 0];  V_arr = grads[::qs, ::qs, 1]
+    mag = np.sqrt(U ** 2 + V_arr ** 2) + 1e-8
+    ax.quiver(Xq, Yq, U / mag, V_arr / mag,
+              color='crimson', alpha=0.65, angles='xy', pivot='mid',
+              scale=grid_res // qs * 1.5, zorder=5)
+
+    ax.scatter([gx], [gy], c='red', marker='*', s=500,
+               edgecolors='white', linewidths=0.8,
+               label=f'Goal ({gx:.1f}, {gy:.1f})', zorder=6)
+    ax.set(xlabel='X', ylabel='Y',
+           title=f'V(s,g)  agg={aggregator}  step={step:,}  goal=({gx},{gy})')
+    ax.legend()
+    fig.tight_layout()
+
+    canvas = FigureCanvas(fig)
+    canvas.draw()
+    w_px, h_px = canvas.get_width_height()
+    img = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8).reshape(h_px, w_px, 4)[:, :, :3]
+    plt.close(fig)
+    return img
 
 
 def _build_prohibited_obs(dataset_obs, obs_template, threshold, grid_step=0.5):
@@ -319,36 +434,46 @@ class DualHILP(flax.struct.PyTreeNode):
             'value/q_bar_min':   q_bar.min(),
         }
 
-        # ---- Prohibited-zone negative penalty (V-only) ----------------------
-        # Pushes V(s_neg, g) below V_floor = reward_shift / (1 - discount)
-        # via hinge loss: penalty only when V(s_neg, g) > V_floor.
-        # Q network is NOT touched — no Bellman backup pollution.
-        #
+        # ---- Prohibited-zone contrastive margin loss (V-only) ---------------
+        # Enforces V(s_neg, g) < V(s_free, g) - margin  (relative ordering).
+        # s_free  = nearest feasible neighbor of s_neg (precomputed by xy KD-tree).
+        # margin  = spatial xy-distance between s_neg and s_free (per-sample).
+        # Gradient flow:
+        #   psi(s_neg)    — updated  (only the prohibited-state encoder moves)
+        #   phi(neg_goal) — stop_gradient  (goal encoder unchanged)
+        #   psi(s_free)   — stop_gradient  (reference value, not updated)
         # neg_weight is 0.0 (inactive) or 1.0 (active) — keeps dict structure
         # constant across steps so JIT traces only once.
-        v_floor = self.config['v_floor']
-        # psi(neg_state)만 역전파. phi(neg_goal)은 stop_gradient:
-        # neg loss 목적은 장애물 state repr 수정이며,
-        # 정상 goal repr(phi)을 장애물 방향으로 오염시키지 않기 위함.
         psi_neg = self.network(
             batch['neg_states'], method='phi', params=network_params)
         phi_neg_goal = jax.lax.stop_gradient(
             self.network(batch['neg_goals'], method='phi_goal', params=network_params))
+        psi_free = jax.lax.stop_gradient(
+            self.network(batch['neg_free'], method='phi', params=network_params))
+
         if self.config['aggregator'] == 'neg_l2':
-            squared_dist = ((psi_neg - phi_neg_goal) ** 2).sum(axis=-1)
-            v_neg = -jnp.sqrt(jnp.maximum(squared_dist, 1e-6))
+            sq_neg  = ((psi_neg  - phi_neg_goal) ** 2).sum(axis=-1)
+            sq_free = ((psi_free - phi_neg_goal) ** 2).sum(axis=-1)
+            v_neg  = -jnp.sqrt(jnp.maximum(sq_neg,  1e-6))
+            v_free = -jnp.sqrt(jnp.maximum(sq_free, 1e-6))
         else:  # inner_prod
-            v_neg = (psi_neg * phi_neg_goal).sum(axis=-1)
-        hinge = jnp.maximum(v_neg - v_floor, 0.0)
-        loss_neg = (hinge ** 2).mean()
+            v_neg  = (psi_neg  * phi_neg_goal).sum(axis=-1)
+            v_free = (psi_free * phi_neg_goal).sum(axis=-1)
+
+        # margin per sample: margin_scale * spatial_dist(s_neg, s_free)
+        margin = self.config['margin_scale'] * batch['neg_margins']   # (n,)
+        violation = jnp.maximum(v_neg - v_free + margin, 0.0)
+        loss_neg = (violation ** 2).mean()
         neg_w = jnp.squeeze(batch['neg_weight'])
         loss = loss + self.config['lambda_neg'] * neg_w * loss_neg
 
-        info['neg/loss_weighted'] = loss_neg * neg_w
-        info['neg/loss_raw']      = loss_neg          # constraint 충족 여부: 0이면 V_neg < v_floor
-        info['neg/v_neg_mean']    = v_neg.mean()      # v_floor 아래여야 정상
-        info['neg/v_neg_max']     = v_neg.max()       # 가장 위험한 값; v_floor보다 낮아야 함
-        info['neg/active']        = neg_w             # 이 step이 active였는지 (0 or 1)
+        info['neg/loss_weighted']    = loss_neg * neg_w
+        info['neg/loss_raw']         = loss_neg          # 0이면 margin constraint 충족
+        info['neg/v_neg_mean']       = v_neg.mean()      # 낮아야 정상
+        info['neg/v_free_mean']      = v_free.mean()     # 기준값 (reference)
+        info['neg/margin_mean']      = margin.mean()     # 평균 spatial margin
+        info['neg/violation_mean']   = violation.mean()  # 0에 가까울수록 constraint 충족
+        info['neg/active']           = neg_w             # 이 step이 active였는지 (0 or 1)
         info['loss'] = loss
         return loss, info
 
@@ -389,7 +514,7 @@ class DualHILP(flax.struct.PyTreeNode):
                value_hidden_dims=(512, 512, 512), discount=0.99, tau=0.005,
                expectile=0.95, use_layer_norm=1, skill_dim=32,
                grad_clip_norm=1.0, aggregator='inner_prod',
-               lambda_neg=0.1, v_floor=None, **kwargs):
+               lambda_neg=0.1, margin_scale=1.0, **kwargs):
         print(f'DualHILP.create — aggregator={aggregator}  extra kwargs:', kwargs)
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
@@ -430,16 +555,13 @@ class DualHILP(flax.struct.PyTreeNode):
         params['networks_target_q'] = params['networks_q_func']
         network = network.replace(params=params)
 
-        # V_floor = reward_shift / (1 - discount)  =  -1 / (1 - 0.995)  =  -200
-        if v_floor is None:
-            v_floor = -1.0 / (1.0 - discount)
-        print(f'DualHILP.create — v_floor={v_floor:.2f}  lambda_neg={lambda_neg}')
+        print(f'DualHILP.create — lambda_neg={lambda_neg}  margin_scale={margin_scale}')
 
         return cls(network=network,
                    config=flax.core.FrozenDict(
                        discount=discount, tau=tau, expectile=expectile,
                        skill_dim=skill_dim, aggregator=aggregator,
-                       lambda_neg=lambda_neg, v_floor=v_floor))
+                       lambda_neg=lambda_neg, margin_scale=margin_scale))
 
 
 # ======================== Main ===============================================
@@ -490,7 +612,10 @@ def main(_):
     print(f'[DualHILP] Traversable viz points: {viz_obs.shape[0]}')
 
     # ---- Build prohibited-zone observations for negative sampling ----------
-    prohibited_obs = None
+    all_obs             = train_data['observations']   # feasible states (full dataset)
+    prohibited_obs      = None
+    neg_nearest_free    = None   # (N_prohibited, obs_dim) nearest feasible obs
+    neg_spatial_margins = None   # (N_prohibited,)         xy dist to nearest feasible
     if FLAGS.p_prohibit > 0 and FLAGS.prohibit_threshold > 0:
         prohibited_obs = _build_prohibited_obs(
             dataset['observations'], obs_template,
@@ -500,6 +625,18 @@ def main(_):
         if prohibited_obs.shape[0] == 0:
             print('[DualHILP] WARNING: no prohibited points found, disabling negative sampling.')
             prohibited_obs = None
+        else:
+            # Precompute nearest feasible (dataset) neighbor for each prohibited point.
+            # Uses xy only (first 2 dims) to match _build_prohibited_obs logic.
+            feasible_xy = all_obs[:, :2].astype(np.float64)
+            prohib_xy   = prohibited_obs[:, :2].astype(np.float64)
+            tree_feasible = KDTree(feasible_xy)
+            dists, idxs = tree_feasible.query(prohib_xy, workers=-1)
+            neg_nearest_free    = all_obs[idxs].astype(np.float32)   # (N_prohibited, obs_dim)
+            neg_spatial_margins = dists.astype(np.float32)            # (N_prohibited,)
+            print(f'[DualHILP] Spatial margins — min={neg_spatial_margins.min():.3f}  '
+                  f'mean={neg_spatial_margins.mean():.3f}  '
+                  f'max={neg_spatial_margins.max():.3f}')
 
     ex_obs = train_data['observations'][:1]
     ex_act = train_data['actions'][:1]
@@ -517,6 +654,7 @@ def main(_):
         grad_clip_norm    = FLAGS.grad_clip_norm,
         aggregator        = FLAGS.aggregator,
         lambda_neg        = FLAGS.lambda_neg,
+        margin_scale      = FLAGS.margin_scale,
     )
 
     # ---- Resume from checkpoint if requested --------------------------------
@@ -539,12 +677,11 @@ def main(_):
             return agent.update(batch)
 
     # ---- Negative sampling helper -------------------------------------------
-    all_obs = train_data['observations']
-
     def _inject_neg_samples(batch):
-        """Always inject neg_states/neg_goals/neg_weight into batch.
+        """Always inject neg_states/neg_free/neg_margins/neg_goals/neg_weight.
 
-        When active (probability p_prohibit): real prohibited-zone states,
+        When active (probability p_prohibit): real prohibited-zone states with
+        their precomputed nearest feasible neighbors and spatial margins.
         neg_weight=1.0.  When inactive: dummy zeros, neg_weight=0.0.
         Dict structure is constant across steps so JIT traces only once.
         """
@@ -555,20 +692,25 @@ def main(_):
         if active:
             neg_idx  = np.random.randint(prohibited_obs.shape[0], size=n)
             goal_idx = np.random.randint(all_obs.shape[0], size=n)
-            batch['neg_states'] = prohibited_obs[neg_idx].astype(np.float32)
-            batch['neg_goals']  = all_obs[goal_idx].astype(np.float32)
-            batch['neg_weight'] = np.ones(n_devices, dtype=np.float32)
+            batch['neg_states']  = prohibited_obs[neg_idx].astype(np.float32)
+            batch['neg_free']    = neg_nearest_free[neg_idx].astype(np.float32)
+            batch['neg_margins'] = neg_spatial_margins[neg_idx].astype(np.float32)
+            batch['neg_goals']   = all_obs[goal_idx].astype(np.float32)
+            batch['neg_weight']  = np.ones(n_devices, dtype=np.float32)
         else:
-            batch['neg_states'] = np.zeros((n, obs_dim), dtype=np.float32)
-            batch['neg_goals']  = np.zeros((n, obs_dim), dtype=np.float32)
-            batch['neg_weight'] = np.zeros(n_devices, dtype=np.float32)
+            batch['neg_states']  = np.zeros((n, obs_dim), dtype=np.float32)
+            batch['neg_free']    = np.zeros((n, obs_dim), dtype=np.float32)
+            batch['neg_margins'] = np.zeros(n, dtype=np.float32)
+            batch['neg_goals']   = np.zeros((n, obs_dim), dtype=np.float32)
+            batch['neg_weight']  = np.zeros(n_devices, dtype=np.float32)
         return batch, active
 
     # ---- Training loop ------------------------------------------------------
     # 모든 지표를 interval mean으로 로깅
     # neg 지표 중 per-step 의미 없는 것들은 active step만 별도 누적
     _NEG_STEP_KEYS = {'neg/active', 'neg/loss_raw', 'neg/loss_weighted',
-                      'neg/v_neg_mean', 'neg/v_neg_max'}
+                      'neg/v_neg_mean', 'neg/v_free_mean',
+                      'neg/margin_mean', 'neg/violation_mean'}
     neg_sample_count = 0
     info_acc    = {}   # 일반 지표: 전체 step 누적
     neg_acc     = {}   # neg 지표: active step만 누적
@@ -590,7 +732,8 @@ def main(_):
 
         # neg 지표는 active step일 때만 누적
         if is_active:
-            for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_neg_max'):
+            for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_free_mean',
+                      'neg/margin_mean', 'neg/violation_mean'):
                 neg_acc.setdefault(k, []).append(_extract(info[k]))
 
         if step % FLAGS.log_interval == 0:
@@ -599,7 +742,8 @@ def main(_):
             log_info['neg/sample_count']    = neg_sample_count
             log_info['neg/sample_rate']     = neg_sample_count / FLAGS.log_interval
             log_info['neg/prohibited_size'] = prohibited_obs.shape[0] if prohibited_obs is not None else 0
-            for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_neg_max'):
+            for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_free_mean',
+                      'neg/margin_mean', 'neg/violation_mean'):
                 log_info[k + '_avg'] = float(np.mean(neg_acc[k])) if neg_acc.get(k) else float('nan')
 
             log_str = '  '.join(
@@ -617,10 +761,16 @@ def main(_):
         if FLAGS.viz_interval > 0 and step % FLAGS.viz_interval == 0:
             if FLAGS.wandb_project and viz_obs.shape[0] > 0:
                 single_agent = jax.tree.map(lambda x: x[0], agent) if n_devices > 1 else agent
-                img = generate_tsne_visualization(
+                tsne_img = generate_tsne_visualization(
                     single_agent, viz_obs, viz_xy, step, FLAGS.seed, FLAGS.aggregator)
-                wandb.log({'diagnostics/psi_tsne': wandb.Image(img)}, step=step)
-                tqdm.tqdm.write(f'[step {step:>8d}] Logged psi(s) t-SNE to WandB.')
+                heatmap_img = generate_heatmap_visualization(
+                    single_agent, env, obs_template, step, FLAGS.aggregator,
+                    gx=17.0, gy=12.0)
+                wandb.log({
+                    'diagnostics/psi_tsne':  wandb.Image(tsne_img),
+                    'diagnostics/heatmap':   wandb.Image(heatmap_img),
+                }, step=step)
+                tqdm.tqdm.write(f'[step {step:>8d}] Logged t-SNE + heatmap to WandB.')
 
         if step % FLAGS.save_interval == 0:
             save_agent(
@@ -656,7 +806,8 @@ if __name__ == '__main__':
     flags.DEFINE_string ('aggregator',     'inner_prod',
                          'Value aggregation: inner_prod (psi^T phi) or neg_l2 (-||psi-phi||).')
     flags.DEFINE_float  ('p_prohibit',     0.0,     'Prob of injecting negative (prohibited) samples per step. 0 = disabled.')
-    flags.DEFINE_float  ('lambda_neg',    0.1,     'Weight of prohibited-zone hinge loss.')
+    flags.DEFINE_float  ('lambda_neg',    0.1,     'Weight of prohibited-zone contrastive margin loss.')
+    flags.DEFINE_float  ('margin_scale',  1.0,     'Scale applied to spatial xy-distance margin: margin = margin_scale * dist(s_neg, s_free).')
     flags.DEFINE_float  ('prohibit_threshold', 1.5, 'KD-tree distance threshold for prohibited zone.')
     flags.DEFINE_integer('resume_step',    0,       'Resume from this step. 0 = start from scratch.')
     flags.DEFINE_string ('wandb_project',  '',      'WandB project name. Empty = disabled.')
