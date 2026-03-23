@@ -685,33 +685,45 @@ def main(_):
         print(f'[DualHILP] Resumed from step {FLAGS.resume_step}, continuing from step {start_step}')
 
     # ---- Build train_step (pmap for multi-GPU, jit for single GPU) ----------
-    # neg loss 유무에 따라 별도의 XLA 프로그램으로 컴파일.
-    # use_neg=True/False는 trace-time static → inactive step에서 forward pass 3개 완전 제거.
-    agent_neg    = agent.replace(config=flax.core.FrozenDict({**agent.config, 'use_neg': True}))
-    agent_no_neg = agent.replace(config=flax.core.FrozenDict({**agent.config, 'use_neg': False}))
+    use_neg = FLAGS.p_prohibit > 0.0 and prohibited_obs is not None
+
+    if use_neg:
+        agent_neg    = agent.replace(config=flax.core.FrozenDict({**agent.config, 'use_neg': True}))
+        agent_no_neg = agent.replace(config=flax.core.FrozenDict({**agent.config, 'use_neg': False}))
 
     if n_devices > 1:
-        agent_neg    = jax.device_put_replicated(agent_neg,    jax.local_devices())
-        agent_no_neg = jax.device_put_replicated(agent_no_neg, jax.local_devices())
+        if use_neg:
+            agent_neg    = jax.device_put_replicated(agent_neg,    jax.local_devices())
+            agent_no_neg = jax.device_put_replicated(agent_no_neg, jax.local_devices())
+
+            @functools.partial(jax.pmap, axis_name='batch')
+            def train_step_neg(agent, batch):
+                return agent.update(batch, pmap_axis='batch')
+
+            @functools.partial(jax.pmap, axis_name='batch')
+            def train_step_no_neg(agent, batch):
+                return agent.update(batch, pmap_axis='batch')
+
+        agent = jax.device_put_replicated(agent, jax.local_devices()) if not use_neg else agent_no_neg
 
         @functools.partial(jax.pmap, axis_name='batch')
-        def train_step_neg(agent, batch):
-            return agent.update(batch, pmap_axis='batch')
-
-        @functools.partial(jax.pmap, axis_name='batch')
-        def train_step_no_neg(agent, batch):
+        def train_step(agent, batch):
             return agent.update(batch, pmap_axis='batch')
     else:
-        @jax.jit
-        def train_step_neg(agent, batch):
-            return agent.update(batch)
+        if use_neg:
+            @jax.jit
+            def train_step_neg(agent, batch):
+                return agent.update(batch)
+
+            @jax.jit
+            def train_step_no_neg(agent, batch):
+                return agent.update(batch)
+
+        agent = agent_no_neg if use_neg else agent
 
         @jax.jit
-        def train_step_no_neg(agent, batch):
+        def train_step(agent, batch):
             return agent.update(batch)
-
-    # 현재 agent를 neg/no_neg 버전으로 시작
-    agent = agent_no_neg
 
     # ---- Negative sampling helper -------------------------------------------
     def _inject_neg_samples(batch):
@@ -769,23 +781,28 @@ def main(_):
         batch = gc_dataset.sample(FLAGS.batch_size)
         _t1 = time.perf_counter()
 
-        batch, is_active = _inject_neg_samples(batch)
-        if is_active:
-            neg_sample_count += 1
+        if use_neg:
+            batch, is_active = _inject_neg_samples(batch)
+            if is_active:
+                neg_sample_count += 1
+        else:
+            is_active = False
         _t2 = time.perf_counter()
 
         if n_devices > 1:
             batch = shard_batch(batch)
         _t3 = time.perf_counter()
 
-        if is_active:
-            # neg forward pass 포함 XLA 프로그램 (use_neg=True로 컴파일됨)
-            agent_neg    = agent_neg.replace(   network=agent.network)
-            agent_neg, info = train_step_neg(agent_neg, batch)
-            agent        = agent_no_neg.replace(network=agent_neg.network)
+        if use_neg:
+            if is_active:
+                agent_neg        = agent_neg.replace(network=agent.network)
+                agent_neg, info  = train_step_neg(agent_neg, batch)
+                agent            = agent_no_neg.replace(network=agent_neg.network)
+            else:
+                agent, info      = train_step_no_neg(agent, batch)
+                agent_neg        = agent_neg.replace(network=agent.network)
         else:
-            agent, info  = train_step_no_neg(agent, batch)
-            agent_neg    = agent_neg.replace(   network=agent.network)
+            agent, info = train_step(agent, batch)
         if _profiling:
             # 프로파일링 중에만 GPU 동기화 (정확한 t_train 측정용)
             jax.tree.map(lambda x: x.block_until_ready(), info)
