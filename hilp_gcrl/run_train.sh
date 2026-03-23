@@ -95,8 +95,8 @@ if [ "${PHASE_CHOICE}" == "1" ]; then
     ENC_CHOICE="${ENC_CHOICE:-1}"
 
     case "${ENC_CHOICE}" in
-        1) SHARE_ENCODER=false ;;
-        2) SHARE_ENCODER=true  ;;
+        1) SHARE_ENCODER=false ; ENC_MODE="separate" ;;
+        2) SHARE_ENCODER=true  ; ENC_MODE="shared"   ;;
         *)
             echo "Invalid choice. Aborting."
             exit 1
@@ -104,8 +104,8 @@ if [ "${PHASE_CHOICE}" == "1" ]; then
     esac
     echo "→ share_encoder: ${SHARE_ENCODER}"
 
-    SAVE_DIR="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
-    HOST_SAVE_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
+    SAVE_DIR="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
+    HOST_SAVE_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
 
     WANDB_PROJECT="${WANDB_PROJECT:-hilp_gcrl}"
     WANDB_RUN_NAME="${WANDB_RUN_NAME:-dual_repr_${AGGREGATOR}_${ENV_NAME}}"

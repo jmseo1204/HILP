@@ -743,15 +743,14 @@ def main(_):
         return batch, active
 
     # ---- Training loop ------------------------------------------------------
-    # 모든 지표를 interval mean으로 로깅
-    # neg 지표 중 per-step 의미 없는 것들은 active step만 별도 누적
+    # 일반 지표: log step 단일 값 (info_acc 제거 → per-step device sync 없음)
+    # neg 지표: active step(~10%)만 누적 → interval 평균
     _NEG_STEP_KEYS = {'neg/loss_raw',
                       'neg/v_neg_mean', 'neg/v_free_mean',
                       'neg/margin_mean', 'neg/violation_mean'}
     neg_sample_count = 0
-    info_acc    = {}   # 일반 지표: 전체 step 누적
-    neg_acc     = {}   # neg 지표: active step만 누적
-    _extract    = (lambda v: float(v[0])) if n_devices > 1 else float
+    neg_acc  = {}   # neg 지표: active step만 누적 (JAX 배열로 보관)
+    _extract = (lambda v: float(v[0])) if n_devices > 1 else float
 
     # ---- Profiling setup ----------------------------------------------------
     _PROFILE_LOG   = os.path.join(FLAGS.save_dir, 'timing_profile.jsonl')
@@ -821,20 +820,17 @@ def main(_):
                 print(f'[PROFILE] avg over {_PROFILE_STEPS} steps: '
                       + '  '.join(f'{k}={v:.1f}ms' for k, v in summary.items()))
 
-        # 일반 지표 누적 (neg per-step 제외)
-        # GPU sync를 피하기 위해 JAX 배열 그대로 누적, float 변환은 로깅 시점에만
-        for k, v in info.items():
-            if k not in _NEG_STEP_KEYS:
-                info_acc.setdefault(k, []).append(v)
-
-        # neg 지표는 active step일 때만 누적
+        # neg 지표: JAX 배열 참조만 보관 (sync 없음)
         if is_active:
             for k in ('neg/loss_raw', 'neg/v_neg_mean', 'neg/v_free_mean',
                       'neg/margin_mean', 'neg/violation_mean'):
-                neg_acc.setdefault(k, []).append(info[k])
+                if k in info:
+                    neg_acc.setdefault(k, []).append(info[k])
 
         if step % FLAGS.log_interval == 0:
-            log_info = {k: float(np.mean([_extract(v) for v in vs])) for k, vs in info_acc.items()}
+            # 일반 지표 + neg 지표 모두 log 시점에 한꺼번에 sync (이전 구조와 동일)
+            log_info = {k: _extract(v) for k, v in info.items()
+                        if k not in _NEG_STEP_KEYS}
 
             log_info['neg/sample_count']    = neg_sample_count
             log_info['neg/sample_rate']     = neg_sample_count / FLAGS.log_interval
@@ -852,7 +848,6 @@ def main(_):
                 wandb.log(log_info, step=step)
 
             neg_sample_count = 0
-            info_acc.clear()
             neg_acc.clear()
 
         if FLAGS.viz_interval > 0 and step % FLAGS.viz_interval == 0:

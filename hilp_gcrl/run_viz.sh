@@ -80,20 +80,48 @@ esac
 echo "→ Aggregator: ${AGGREGATOR}"
 
 # ============================================================
+# [Step 4] Encoder mode (must match training)
+# ============================================================
+echo ""
+echo "============================================"
+echo "  Select encoder mode (must match training):"
+echo "  [1] separate  — psi(s) 와 phi(g) 별도 MLP"
+echo "  [2] shared    — psi(s) 와 phi(g) 공유 MLP"
+echo "============================================"
+read -rp "Your choice [1/2, default: 1]: " ENC_CHOICE
+ENC_CHOICE="${ENC_CHOICE:-1}"
+
+case "${ENC_CHOICE}" in
+    1) ENC_MODE="separate" ;;
+    2) ENC_MODE="shared"   ;;
+    *)
+        echo "Invalid choice. Aborting."
+        exit 1
+        ;;
+esac
+echo "→ Encoder mode: ${ENC_MODE}"
+
+# ============================================================
 # Mode-specific checkpoint selection
 # ============================================================
 
 if [ "${VIZ_MODE}" = "dual_repr" ]; then
     SKILL_DIM=${SKILL_DIM_DUAL}
 
-    # ---- [Step 4a] Dual repr checkpoint ------------------------------------
-    HOST_CKPT_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
-    RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
+    # ---- [Step 5a] Dual repr checkpoint ------------------------------------
+    HOST_CKPT_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
+    RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
 
+    if [ ! -d "${HOST_CKPT_DIR}" ]; then
+        # legacy fallback (aggregator subdir without enc_mode)
+        HOST_CKPT_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
+        RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
+        echo "  (falling back to legacy path without enc_mode subdir)"
+    fi
     if [ ! -d "${HOST_CKPT_DIR}" ]; then
         HOST_CKPT_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
         RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
-        echo "  (using legacy checkpoint path without aggregator subdir)"
+        echo "  (falling back to legacy path without aggregator subdir)"
     fi
 
     mapfile -t CKPT_FILES < <(ls "${HOST_CKPT_DIR}"/params_*.pkl 2>/dev/null | sort -t_ -k2 -n)
@@ -180,14 +208,19 @@ else
         exit 1
     fi
 
-    # ---- [Step 5] Dual (phase-1) checkpoint for phi(g) ----------------------
-    HOST_DUAL_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
-    DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
+    # ---- [Step 6] Dual (phase-1) checkpoint for phi(g) ----------------------
+    HOST_DUAL_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
+    DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
 
+    if [ ! -d "${HOST_DUAL_DIR}" ]; then
+        HOST_DUAL_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
+        DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
+        echo "  (falling back to legacy path without enc_mode subdir)"
+    fi
     if [ ! -d "${HOST_DUAL_DIR}" ]; then
         HOST_DUAL_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
         DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
-        echo "  (using legacy dual checkpoint path without aggregator subdir)"
+        echo "  (falling back to legacy path without aggregator subdir)"
     fi
 
     mapfile -t DUAL_FILES < <(ls "${HOST_DUAL_DIR}"/params_*.pkl 2>/dev/null | sort -t_ -k2 -n)
