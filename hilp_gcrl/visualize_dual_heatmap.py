@@ -15,6 +15,7 @@ For 'gcvf':
 All dependencies are inside hilp_gcrl/.
 """
 
+import glob
 import os
 import sys
 from pathlib import Path
@@ -327,8 +328,17 @@ def main(_):
 
     gx_s  = f'{gx:.1f}'.replace('.', '_').replace('-', 'm')
     gy_s  = f'{gy:.1f}'.replace('.', '_').replace('-', 'm')
+    # ckpt 파일명에서 timestamp 파싱: params_{step}_{YYYYMMDD}_{HHMMSS}.pkl
+    _ckpt_candidates = glob.glob(
+        os.path.join(FLAGS.restore_path, f'params_{FLAGS.restore_epoch}_*.pkl'))
+    if _ckpt_candidates:
+        _stem = os.path.basename(_ckpt_candidates[0])[:-4]   # strip .pkl
+        _parts = _stem.split('_')  # ['params', step, YYYYMMDD, HHMMSS]
+        _ts = f'{_parts[2]}_{_parts[3]}' if len(_parts) >= 4 else 'nots'
+    else:
+        _ts = 'nots'
     fname = (f'dual_{FLAGS.mode}_{FLAGS.env_name}'
-             f'_x{gx_s}_y{gy_s}_ep{FLAGS.restore_epoch}.png')
+             f'_x{gx_s}_y{gy_s}_ep{FLAGS.restore_epoch}_{_ts}.png')
     _plot(X, Y, values, mi, gx, gy, title, cbar,
           os.path.join(FLAGS.save_dir, fname),
           grad_field=grad_field)

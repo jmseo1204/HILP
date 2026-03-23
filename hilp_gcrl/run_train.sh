@@ -31,6 +31,7 @@ VIZ_INTERVAL=20000
 P_PROHIBIT=0.1
 LAMBDA_NEG=0.1
 PROHIBIT_THRESHOLD=1.5
+SHARE_ENCODER=false
 
 # Phase 2 specific
 TRAIN_STEPS_P2=500000
@@ -83,13 +84,33 @@ if [ "${PHASE_CHOICE}" == "1" ]; then
     esac
     echo "→ Aggregator: ${AGGREGATOR}"
 
+    # ---- [Step 2] Encoder sharing -------------------------------------------
+    echo ""
+    echo "============================================"
+    echo "  Select encoder mode:"
+    echo "  [1] separate  — psi(s) 와 phi(g) 를 별도 MLP"
+    echo "  [2] shared    — psi(s) 와 phi(g) 가 동일 MLP 공유"
+    echo "============================================"
+    read -rp "Your choice [1/2, default: 1]: " ENC_CHOICE
+    ENC_CHOICE="${ENC_CHOICE:-1}"
+
+    case "${ENC_CHOICE}" in
+        1) SHARE_ENCODER=false ;;
+        2) SHARE_ENCODER=true  ;;
+        *)
+            echo "Invalid choice. Aborting."
+            exit 1
+            ;;
+    esac
+    echo "→ share_encoder: ${SHARE_ENCODER}"
+
     SAVE_DIR="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
     HOST_SAVE_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
 
     WANDB_PROJECT="${WANDB_PROJECT:-hilp_gcrl}"
     WANDB_RUN_NAME="${WANDB_RUN_NAME:-dual_repr_${AGGREGATOR}_${ENV_NAME}}"
 
-    # ---- [Step 2] Checkpoint detection --------------------------------------
+    # ---- [Step 3] Checkpoint detection --------------------------------------
     RESUME_STEP=0
 
     if [ -d "${HOST_SAVE_DIR}" ]; then
@@ -158,6 +179,7 @@ if [ "${PHASE_CHOICE}" == "1" ]; then
                 --p_prohibit=${P_PROHIBIT} \
                 --lambda_neg=${LAMBDA_NEG} \
                 --prohibit_threshold=${PROHIBIT_THRESHOLD} \
+                --share_encoder=${SHARE_ENCODER} \
                 --wandb_project=${WANDB_PROJECT} \
                 --wandb_run_name=${WANDB_RUN_NAME}
         "

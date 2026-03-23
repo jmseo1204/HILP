@@ -124,29 +124,27 @@ class GoalConditionedCritic(nn.Module):
 class DualGoalPhiValue(nn.Module):
     """
     Dual Goal Representation value function (arXiv:2510.06714).
-    Separate state encoder psi and goal encoder phi.
 
     aggregator='inner_prod' (default):
         V(s, g) = psi(s)^T phi(g)
-        Gradient: J_psi(s)^T * phi(g)  — phi(g) acts as goal-direction vector
 
     aggregator='neg_l2':
         V(s, g) = -||psi(s) - phi(g)||
-        Gradient direction: unit vector toward phi(g) in latent space,
-        independent of temporal distance (no saturation).
 
-    Single (psi, phi) pair — no ensemble.
+    share_encoder=False (default): psi와 phi가 별도의 독립 MLP
+    share_encoder=True:            psi와 phi가 동일한 MLP 공유
     """
     hidden_dims: tuple = (256, 256)
     skill_dim: int = 32
     use_layer_norm: bool = True
-    encoder: nn.Module = None
     aggregator: str = 'inner_prod'   # 'inner_prod' | 'neg_l2'
+    share_encoder: bool = False
 
     def setup(self):
         repr_class = LayerNormRepresentation if self.use_layer_norm else Representation
-        self.psi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=False)
         self.phi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=False)
+        if not self.share_encoder:
+            self.psi = repr_class((*self.hidden_dims, self.skill_dim), activate_final=False, ensemble=False)
 
     def get_phi(self, goals):
         """phi(g): dual goal representation. Returns (B, D)."""
@@ -154,11 +152,12 @@ class DualGoalPhiValue(nn.Module):
 
     def get_psi(self, observations):
         """psi(s): state representation. Returns (B, D)."""
-        return self.psi(observations)
+        enc = self.phi if self.share_encoder else self.psi
+        return enc(observations)
 
     def __call__(self, observations, goals=None):
-        psi_s = self.psi(observations)    # (B, D)
-        phi_g = self.phi(goals)           # (B, D)
+        psi_s = (self.phi if self.share_encoder else self.psi)(observations)
+        phi_g = self.phi(goals)
         if self.aggregator == 'neg_l2':
             squared_dist = ((psi_s - phi_g) ** 2).sum(axis=-1)
             v = -jnp.sqrt(jnp.maximum(squared_dist, 1e-6))

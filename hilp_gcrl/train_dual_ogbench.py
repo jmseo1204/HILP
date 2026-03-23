@@ -520,7 +520,7 @@ class DualHILP(flax.struct.PyTreeNode):
                value_hidden_dims=(512, 512, 512), discount=0.99, tau=0.005,
                expectile=0.95, use_layer_norm=1, skill_dim=32,
                grad_clip_norm=1.0, aggregator='inner_prod',
-               lambda_neg=0.1, margin_scale=1.0, **kwargs):
+               lambda_neg=0.1, margin_scale=1.0, share_encoder=False, **kwargs):
         print(f'DualHILP.create — aggregator={aggregator}  extra kwargs:', kwargs)
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng)
@@ -531,6 +531,7 @@ class DualHILP(flax.struct.PyTreeNode):
             skill_dim=skill_dim,
             use_layer_norm=bool(use_layer_norm),
             aggregator=aggregator,
+            share_encoder=bool(share_encoder),
         )
 
         # Q(s,a,g) = MLP([s, g, a]) — separate Q network (Algorithm 1)
@@ -673,6 +674,7 @@ def main(_):
         aggregator        = FLAGS.aggregator,
         lambda_neg        = FLAGS.lambda_neg,
         margin_scale      = FLAGS.margin_scale,
+        share_encoder     = FLAGS.share_encoder,
     )
 
     # ---- Resume from checkpoint if requested --------------------------------
@@ -905,6 +907,7 @@ if __name__ == '__main__':
     flags.DEFINE_float  ('p_prohibit',     0.0,     'Prob of injecting negative (prohibited) samples per step. 0 = disabled.')
     flags.DEFINE_float  ('lambda_neg',    0.1,     'Weight of prohibited-zone contrastive margin loss.')
     flags.DEFINE_float  ('margin_scale',  1.0,     'Scale applied to spatial xy-distance margin: margin = margin_scale * dist(s_neg, s_free).')
+    flags.DEFINE_bool   ('share_encoder', False,   'Share psi/phi encoder (True) or use separate encoders (False).')
     flags.DEFINE_float  ('prohibit_threshold', 1.5, 'KD-tree distance threshold for prohibited zone.')
     flags.DEFINE_integer('resume_step',    0,       'Resume from this step. 0 = start from scratch.')
     flags.DEFINE_string ('wandb_project',  '',      'WandB project name. Empty = disabled.')
