@@ -105,8 +105,7 @@ if [ "${VIZ_MODE}" = "dual_repr" ]; then
     echo ""
     echo "Available dual_repr checkpoints:"
     for i in "${!CKPT_FILES[@]}"; do
-        STEP=$(basename "${CKPT_FILES[$i]}" .pkl | cut -d_ -f2)
-        echo "  [$((i+1))] step ${STEP}"
+        echo "  [$((i+1))] $(basename "${CKPT_FILES[$i]}")"
     done
     read -rp "Your choice: " CKPT_CHOICE
 
@@ -167,8 +166,7 @@ else
     echo ""
     echo "Available GCVF (phase-2) checkpoints:"
     for i in "${!GCVF_FILES[@]}"; do
-        STEP=$(basename "${GCVF_FILES[$i]}" .pkl | cut -d_ -f2)
-        echo "  [$((i+1))] step ${STEP}"
+        echo "  [$((i+1))] $(basename "${GCVF_FILES[$i]}")"
     done
     read -rp "Your choice: " GCVF_CHOICE
 
@@ -201,8 +199,7 @@ else
     echo ""
     echo "Available dual_repr (phase-1) checkpoints for phi(g):"
     for i in "${!DUAL_FILES[@]}"; do
-        STEP=$(basename "${DUAL_FILES[$i]}" .pkl | cut -d_ -f2)
-        echo "  [$((i+1))] step ${STEP}"
+        echo "  [$((i+1))] $(basename "${DUAL_FILES[$i]}")"
     done
     read -rp "Your choice: " DUAL_CHOICE
 

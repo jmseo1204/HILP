@@ -99,8 +99,7 @@ if [ "${PHASE_CHOICE}" == "1" ]; then
             echo ""
             echo "Existing checkpoints detected (aggregator=${AGGREGATOR}):"
             for i in "${!CKPT_FILES[@]}"; do
-                STEP=$(basename "${CKPT_FILES[$i]}" .pkl | cut -d_ -f2)
-                echo "  [$((i+1))] step ${STEP}"
+                echo "  [$((i+1))] $(basename "${CKPT_FILES[$i]}")"
             done
             echo "  [f] Start from scratch (existing checkpoints will be kept)"
             echo ""

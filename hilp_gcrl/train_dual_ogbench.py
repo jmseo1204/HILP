@@ -71,6 +71,12 @@ def save_agent(agent, save_dir, step):
     with open(path, 'wb') as f:
         pickle.dump({'agent': flax.serialization.to_state_dict(agent)}, f)
     print(f'Saved → {path}')
+    # 새 ckpt 저장 후 이전 ckpt 자동 삭제 (최신 1개만 유지)
+    old = sorted(glob.glob(os.path.join(save_dir, 'params_*.pkl')))
+    for old_path in old:
+        if old_path != path:
+            os.remove(old_path)
+            print(f'Removed old ckpt → {old_path}')
 
 
 def restore_agent(agent, restore_dir, restore_epoch):
@@ -451,7 +457,8 @@ class DualHILP(flax.struct.PyTreeNode):
                 batch['neg_states'], method='phi', params=network_params)
             phi_neg_goal = jax.lax.stop_gradient(
                 self.network(batch['neg_goals'], method='phi_goal', params=network_params))
-            psi_free = self.network(batch['neg_free'], method='phi')
+            psi_free = jax.lax.stop_gradient(
+                self.network(batch['neg_free'], method='phi', params=network_params))
 
             if self.config['aggregator'] == 'neg_l2':
                 sq_neg  = ((psi_neg  - phi_neg_goal) ** 2).sum(axis=-1)
