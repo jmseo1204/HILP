@@ -201,7 +201,7 @@ def generate_tsne_visualization(agent, obs_array, xy_array, step, seed, aggregat
 
 
 def generate_heatmap_visualization(agent, env, obs_template, step, aggregator,
-                                   gx=17.0, gy=12.0, grid_res=80):
+                                   gx=17.0, gy=12.0, grid_res=80, share_encoder=False):
     """
     V(s,g) heatmap + ∇_s V gradient field for WandB logging.
     Returns (H, W, 3) uint8 image.
@@ -288,17 +288,27 @@ def generate_heatmap_visualization(agent, env, obs_template, step, aggregator,
 
     qs = max(1, grid_res // 25)
     Xq = X[::qs, ::qs];  Yq = Y[::qs, ::qs]
-    U = grads[::qs, ::qs, 0];  V_arr = grads[::qs, ::qs, 1]
-    mag = np.sqrt(U ** 2 + V_arr ** 2) + 1e-8
-    ax.quiver(Xq, Yq, U / mag, V_arr / mag,
-              color='crimson', alpha=0.65, angles='xy', pivot='mid',
-              scale=grid_res // qs * 1.5, zorder=5)
+    gf_q = grads[::qs, ::qs, :]  # (H', W', 2)
+    U_raw = gf_q[:, :, 0];  V_raw = gf_q[:, :, 1]
+    mag = np.sqrt(U_raw ** 2 + V_raw ** 2)
+    g_mean = float(np.nanmean(mag))
+    g_std  = float(np.nanstd(mag)) + 1e-8
+    scale  = np.clip((mag - g_mean) / g_std + 1.0, 0.0, None)
+    denom  = mag + 1e-8
+    U_norm = np.where(np.isnan(U_raw), np.nan, U_raw / denom * scale)
+    V_norm = np.where(np.isnan(V_raw), np.nan, V_raw / denom * scale)
 
+    ax.quiver(Xq, Yq, U_norm, V_norm,
+              color='crimson', alpha=0.65, angles='xy', pivot='mid',
+              scale=None, scale_units='xy', zorder=5,
+              label=f'∇V(s,g)  (mean={g_mean:.2e}, std={g_std:.2e})')
+
+    enc_label = 'shared' if share_encoder else 'separate'
     ax.scatter([gx], [gy], c='red', marker='*', s=500,
                edgecolors='white', linewidths=0.8,
                label=f'Goal ({gx:.1f}, {gy:.1f})', zorder=6)
     ax.set(xlabel='X', ylabel='Y',
-           title=f'V(s,g)  agg={aggregator}  step={step:,}  goal=({gx},{gy})')
+           title=f'V(s,g)  agg={aggregator}  enc={enc_label}  step={step:,}  goal=({gx},{gy})')
     ax.legend()
     fig.tight_layout()
 
@@ -874,7 +884,7 @@ def main(_):
                     single_agent, viz_obs, viz_xy, step, FLAGS.seed, FLAGS.aggregator)
                 heatmap_img = generate_heatmap_visualization(
                     single_agent, env, obs_template, step, FLAGS.aggregator,
-                    gx=17.0, gy=12.0)
+                    gx=17.0, gy=12.0, share_encoder=FLAGS.share_encoder)
                 wandb.log({
                     'diagnostics/psi_tsne':  wandb.Image(tsne_img),
                     'diagnostics/heatmap':   wandb.Image(heatmap_img),
