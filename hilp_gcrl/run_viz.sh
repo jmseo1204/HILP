@@ -157,6 +157,9 @@ if [ "${VIZ_MODE}" = "dual_repr" ]; then
     echo "  output dir : ${SAVE_DIR}"
     echo "============================================"
 
+    SHARE_ENCODER_FLAG="false"
+    [ "${ENC_MODE}" = "shared" ] && SHARE_ENCODER_FLAG="true"
+
     docker run --rm \
         -v "${WORKSPACE_ROOT}:/workspace" \
         -v "${OGBENCH_DATA_DIR}:/home/${UNAME}/.ogbench/data" \
@@ -172,6 +175,7 @@ if [ "${VIZ_MODE}" = "dual_repr" ]; then
                 --restore_epoch=${RESTORE_EPOCH} \
                 --skill_dim=${SKILL_DIM} \
                 --aggregator=${AGGREGATOR} \
+                --share_encoder=${SHARE_ENCODER_FLAG} \
                 --goal_pos=${GOAL_X},${GOAL_Y} \
                 --grid_res=${GRID_RES} \
                 --save_dir=${SAVE_DIR}
@@ -257,6 +261,9 @@ else
     echo "  output dir     : ${SAVE_DIR}"
     echo "============================================"
 
+    SHARE_ENCODER_FLAG="false"
+    [ "${ENC_MODE}" = "shared" ] && SHARE_ENCODER_FLAG="true"
+
     docker run --rm \
         -v "${WORKSPACE_ROOT}:/workspace" \
         -v "${OGBENCH_DATA_DIR}:/home/${UNAME}/.ogbench/data" \
@@ -274,6 +281,7 @@ else
                 --dual_restore_epoch=${DUAL_RESTORE_EPOCH} \
                 --skill_dim=${SKILL_DIM} \
                 --aggregator=${AGGREGATOR} \
+                --share_encoder=${SHARE_ENCODER_FLAG} \
                 --goal_pos=${GOAL_X},${GOAL_Y} \
                 --grid_res=${GRID_RES} \
                 --save_dir=${SAVE_DIR}

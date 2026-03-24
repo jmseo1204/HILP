@@ -49,6 +49,7 @@ flags.DEFINE_float  ('expectile',          0.95,   'Must match training.')
 flags.DEFINE_integer('use_layer_norm',     1,      'Must match training.')
 flags.DEFINE_string ('aggregator',         'inner_prod',
                      'Value aggregation used at training: inner_prod or neg_l2.')
+flags.DEFINE_bool   ('share_encoder',      False,  'Must match training: shared psi/phi encoder.')
 flags.DEFINE_list   ('goal_pos',           ['12.0', '8.0'], 'Goal (x, y).')
 flags.DEFINE_integer('grid_res',           100,    'Grid resolution.')
 flags.DEFINE_string ('save_dir',           'visualizations', 'Output dir.')
@@ -193,6 +194,7 @@ def _run_dual_repr(obs_all, ex_act, mi):
         skill_dim=FLAGS.skill_dim, discount=FLAGS.discount,
         expectile=FLAGS.expectile, use_layer_norm=FLAGS.use_layer_norm,
         aggregator=FLAGS.aggregator,
+        share_encoder=FLAGS.share_encoder,
     )
     agent = restore_agent(agent, FLAGS.restore_path, FLAGS.restore_epoch)
 
@@ -255,6 +257,7 @@ def _run_gcvf(obs_all, ex_act, mi):
         skill_dim=FLAGS.skill_dim, discount=FLAGS.discount,
         expectile=FLAGS.expectile, use_layer_norm=FLAGS.use_layer_norm,
         aggregator=FLAGS.aggregator,
+        share_encoder=FLAGS.share_encoder,
     )
     dual_agent = restore_agent(dual_agent, FLAGS.dual_restore_path, FLAGS.dual_restore_epoch)
 
