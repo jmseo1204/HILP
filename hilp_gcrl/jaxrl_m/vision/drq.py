@@ -8,7 +8,7 @@ from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
 
 
-def default_init(scale: Optional[float] = jnp.sqrt(2)):
+def default_init(scale: Optional[float] = 2**0.5):
     return nn.initializers.orthogonal(scale)
 
 

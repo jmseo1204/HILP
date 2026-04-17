@@ -2,9 +2,9 @@
 # ============================================================
 # Unified Heatmap + Gradient-Field Visualization
 # Supports two modes:
-#   [1] dual_repr  —  V(s,g) = psi(s)^T phi(g)  or  -||psi(s)-phi(g)||
-#   [2] gcvf       —  V_down(s, phi(g))
-# Arrows show ∇_s V(s,g) (value gradient w.r.t. state position).
+#   [1] dual_repr  - V(s,g) = psi(s)^T phi(g)  or  -||psi(s)-phi(g)||
+#   [2] gcvf       - V_down(s, phi(g))
+# Arrows show grad_s V(s,g) (value gradient w.r.t. state position).
 # ============================================================
 
 set -e
@@ -13,15 +13,297 @@ WORKSPACE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER_IMAGE="mctd:0.1"
 OGBENCH_DATA_DIR="${WORKSPACE_ROOT}/ogbench_data"
 UNAME="$(whoami)"
+HILP_ROOT="${WORKSPACE_ROOT}/HILP/hilp_gcrl"
+DUAL_EXP_ROOT="${HILP_ROOT}/exp/dual_repr"
+GCVF_EXP_ROOT="${HILP_ROOT}/exp/gcvf_dual"
 
 # ---- Fixed parameters -------------------------------------------------------
-ENV_NAME="antmaze-giant-navigate-v0"
-SKILL_DIM_DUAL=256   # skill_dim for dual_repr mode
-SKILL_DIM_GCVF=32    # skill_dim for gcvf mode (dual agent used in phase-2)
-
+SKILL_DIM_DUAL=256
+SKILL_DIM_GCVF=32
 GRID_RES=100
 SAVE_DIR="/workspace/HILP/hilp_gcrl/visualizations"
 PYTHON_SCRIPT="/workspace/HILP/hilp_gcrl/visualize_dual_heatmap.py"
+
+CHOSEN_INDEX=-1
+
+normalize_aggregator() {
+    case "$1" in
+        inner|inner_prod) echo "inner_prod" ;;
+        neg_l2) echo "neg_l2" ;;
+        *) echo "" ;;
+    esac
+}
+
+host_path_to_container() {
+    local host_path="$1"
+
+    case "${host_path}" in
+        "${WORKSPACE_ROOT}"/*) printf '/workspace%s\n' "${host_path#${WORKSPACE_ROOT}}" ;;
+        *)
+            echo "ERROR: Cannot map host path to container path: ${host_path}"
+            exit 1
+            ;;
+    esac
+}
+
+has_ckpt_under_dir() {
+    local search_dir="$1"
+    local first_ckpt=""
+
+    if [ -d "${search_dir}" ]; then
+        first_ckpt="$(find "${search_dir}" -type f -name 'params_*.pkl' -print -quit 2>/dev/null)"
+    fi
+
+    [ -n "${first_ckpt}" ]
+}
+
+collect_sorted_ckpts() {
+    local search_dir="$1"
+    local -n out_ref="$2"
+    local ckpt_path=""
+    local step=""
+
+    out_ref=()
+
+    [ -d "${search_dir}" ] || return 0
+
+    while IFS=$'\t' read -r _sorted_step ckpt_path; do
+        [ -n "${ckpt_path}" ] && out_ref+=("${ckpt_path}")
+    done < <(
+        while IFS= read -r ckpt_path; do
+            step="$(basename "${ckpt_path}" .pkl | cut -d_ -f2)"
+            if [[ "${step}" =~ ^[0-9]+$ ]]; then
+                printf '%012d\t%s\n' "${step}" "${ckpt_path}"
+            else
+                printf '%012d\t%s\n' 0 "${ckpt_path}"
+            fi
+        done < <(find "${search_dir}" -type f -name 'params_*.pkl' 2>/dev/null) | sort -t $'\t' -k1,1n -k2,2
+    )
+}
+
+prompt_index_choice() {
+    local prompt="$1"
+    local max_choice="$2"
+    local user_choice=""
+
+    read -rp "${prompt}" user_choice
+
+    if [[ "${user_choice}" =~ ^[0-9]+$ ]] && [ "${user_choice}" -ge 1 ] && [ "${user_choice}" -le "${max_choice}" ]; then
+        CHOSEN_INDEX=$((user_choice - 1))
+        return 0
+    fi
+
+    echo "Invalid choice. Aborting."
+    exit 1
+}
+
+discover_datasets() {
+    local dataset_file=""
+    local dataset_name=""
+
+    DATASET_OPTIONS=()
+
+    if [ ! -d "${OGBENCH_DATA_DIR}" ]; then
+        echo "Dataset directory not found: ${OGBENCH_DATA_DIR}"
+        exit 1
+    fi
+
+    while IFS= read -r dataset_file; do
+        dataset_name="$(basename "${dataset_file}" .npz)"
+        DATASET_OPTIONS+=("${dataset_name}")
+    done < <(find "${OGBENCH_DATA_DIR}" -maxdepth 1 -type f -name '*.npz' ! -name '*-val.npz' | sort)
+
+    if [ ${#DATASET_OPTIONS[@]} -eq 0 ]; then
+        echo "No datasets found in: ${OGBENCH_DATA_DIR}"
+        exit 1
+    fi
+}
+
+select_dataset() {
+    discover_datasets
+
+    echo ""
+    echo "============================================"
+    echo "  Select dataset from ../ogbench_data:"
+    for i in "${!DATASET_OPTIONS[@]}"; do
+        printf '  [%2d] %s\n' "$((i + 1))" "${DATASET_OPTIONS[$i]}"
+    done
+    echo "============================================"
+    prompt_index_choice "Your choice: " "${#DATASET_OPTIONS[@]}"
+
+    ENV_NAME="${DATASET_OPTIONS[$CHOSEN_INDEX]}"
+    echo "→ Dataset: ${ENV_NAME}"
+}
+
+ensure_dataset_has_any_ckpt() {
+    local dual_dir="${DUAL_EXP_ROOT}/${ENV_NAME}"
+    local gcvf_dir="${GCVF_EXP_ROOT}/${ENV_NAME}"
+
+    if has_ckpt_under_dir "${dual_dir}" || has_ckpt_under_dir "${gcvf_dir}"; then
+        return 0
+    fi
+
+    echo "No checkpoints found for dataset: ${ENV_NAME}"
+    echo "  checked:"
+    echo "    ${dual_dir}"
+    echo "    ${gcvf_dir}"
+    exit 1
+}
+
+infer_dual_ckpt_metadata() {
+    local ckpt_path="$1"
+    local rel_path="${ckpt_path#${HOST_DUAL_ENV_DIR}/}"
+    local -a rel_parts=()
+    local raw_aggregator=""
+    local raw_encoder="separate"
+
+    IFS='/' read -r -a rel_parts <<< "${rel_path}"
+
+    case "${#rel_parts[@]}" in
+        2)
+            raw_aggregator="${rel_parts[0]}"
+            ;;
+        3)
+            raw_aggregator="${rel_parts[0]}"
+            raw_encoder="${rel_parts[1]}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    CKPT_AGGREGATOR="$(normalize_aggregator "${raw_aggregator}")"
+    [ -n "${CKPT_AGGREGATOR}" ] || return 1
+
+    case "${raw_encoder}" in
+        shared) CKPT_ENCODER_MODE="shared" ;;
+        separate|"") CKPT_ENCODER_MODE="separate" ;;
+        *) return 1 ;;
+    esac
+
+    CKPT_STEP="$(basename "${ckpt_path}" .pkl | cut -d_ -f2)"
+    [[ "${CKPT_STEP}" =~ ^[0-9]+$ ]] || return 1
+}
+
+build_dual_ckpt_options() {
+    local -a raw_ckpts=()
+    local ckpt_path=""
+    local rel_path=""
+
+    DUAL_FILES=()
+    DUAL_LABELS=()
+    DUAL_STEPS=()
+    DUAL_AGGREGATORS=()
+    DUAL_ENCODER_MODES=()
+    DUAL_RESTORE_DIRS=()
+
+    collect_sorted_ckpts "${HOST_DUAL_ENV_DIR}" raw_ckpts
+
+    for ckpt_path in "${raw_ckpts[@]}"; do
+        if infer_dual_ckpt_metadata "${ckpt_path}"; then
+            rel_path="${ckpt_path#${HOST_DUAL_ENV_DIR}/}"
+            DUAL_FILES+=("${ckpt_path}")
+            DUAL_LABELS+=("step ${CKPT_STEP} | agg=${CKPT_AGGREGATOR} | encoder=${CKPT_ENCODER_MODE} | ${rel_path}")
+            DUAL_STEPS+=("${CKPT_STEP}")
+            DUAL_AGGREGATORS+=("${CKPT_AGGREGATOR}")
+            DUAL_ENCODER_MODES+=("${CKPT_ENCODER_MODE}")
+            DUAL_RESTORE_DIRS+=("$(host_path_to_container "$(dirname "${ckpt_path}")")")
+        fi
+    done
+}
+
+select_dual_ckpt() {
+    local header="$1"
+    local choice_label="$2"
+    local selected_ckpt=""
+
+    HOST_DUAL_ENV_DIR="${DUAL_EXP_ROOT}/${ENV_NAME}"
+    build_dual_ckpt_options
+
+    if [ ${#DUAL_FILES[@]} -eq 0 ]; then
+        echo "No usable dual_repr checkpoints found for dataset: ${ENV_NAME}"
+        echo "  checked: ${HOST_DUAL_ENV_DIR}"
+        exit 1
+    fi
+
+    echo ""
+    echo "============================================"
+    echo "  ${header}"
+    for i in "${!DUAL_FILES[@]}"; do
+        printf '  [%2d] %s\n' "$((i + 1))" "${DUAL_LABELS[$i]}"
+    done
+    echo "============================================"
+    prompt_index_choice "${choice_label}: " "${#DUAL_FILES[@]}"
+
+    selected_ckpt="${DUAL_FILES[$CHOSEN_INDEX]}"
+    RESTORE_EPOCH="${DUAL_STEPS[$CHOSEN_INDEX]}"
+    AGGREGATOR="${DUAL_AGGREGATORS[$CHOSEN_INDEX]}"
+    ENC_MODE="${DUAL_ENCODER_MODES[$CHOSEN_INDEX]}"
+    RESTORE_PATH="${DUAL_RESTORE_DIRS[$CHOSEN_INDEX]}"
+
+    echo "→ Dual repr checkpoint: $(basename "${selected_ckpt}")"
+    echo "  aggregator: ${AGGREGATOR}"
+    echo "  encoder   : ${ENC_MODE}"
+}
+
+build_gcvf_ckpt_options() {
+    local -a raw_ckpts=()
+    local ckpt_path=""
+    local rel_path=""
+    local step=""
+
+    GCVF_FILES=()
+    GCVF_LABELS=()
+    GCVF_STEPS=()
+    GCVF_RESTORE_DIRS=()
+
+    collect_sorted_ckpts "${HOST_GCVF_ENV_DIR}" raw_ckpts
+
+    for ckpt_path in "${raw_ckpts[@]}"; do
+        step="$(basename "${ckpt_path}" .pkl | cut -d_ -f2)"
+        if [[ "${step}" =~ ^[0-9]+$ ]]; then
+            rel_path="${ckpt_path#${HOST_GCVF_ENV_DIR}/}"
+            GCVF_FILES+=("${ckpt_path}")
+            GCVF_LABELS+=("step ${step} | ${rel_path}")
+            GCVF_STEPS+=("${step}")
+            GCVF_RESTORE_DIRS+=("$(host_path_to_container "$(dirname "${ckpt_path}")")")
+        fi
+    done
+}
+
+select_gcvf_ckpt() {
+    local selected_ckpt=""
+
+    HOST_GCVF_ENV_DIR="${GCVF_EXP_ROOT}/${ENV_NAME}"
+    build_gcvf_ckpt_options
+
+    if [ ${#GCVF_FILES[@]} -eq 0 ]; then
+        echo "No GCVF checkpoints found for dataset: ${ENV_NAME}"
+        echo "  checked: ${HOST_GCVF_ENV_DIR}"
+        exit 1
+    fi
+
+    echo ""
+    echo "============================================"
+    echo "  Select GCVF checkpoint:"
+    for i in "${!GCVF_FILES[@]}"; do
+        printf '  [%2d] %s\n' "$((i + 1))" "${GCVF_LABELS[$i]}"
+    done
+    echo "============================================"
+    prompt_index_choice "Your choice: " "${#GCVF_FILES[@]}"
+
+    selected_ckpt="${GCVF_FILES[$CHOSEN_INDEX]}"
+    RESTORE_EPOCH="${GCVF_STEPS[$CHOSEN_INDEX]}"
+    RESTORE_PATH="${GCVF_RESTORE_DIRS[$CHOSEN_INDEX]}"
+
+    echo "→ GCVF checkpoint: $(basename "${selected_ckpt}")"
+}
+
+# ============================================================
+# [Step 0] Dataset selection
+# ============================================================
+select_dataset
+ensure_dataset_has_any_ckpt
 
 # ============================================================
 # [Step 1] Goal position
@@ -42,12 +324,12 @@ echo "→ Goal: (${GOAL_X}, ${GOAL_Y})"
 echo ""
 echo "============================================"
 echo "  Select visualization mode:"
-echo "  [1] dual_repr  — V(s,g) = psi(s)^T phi(g)"
-echo "  [2] gcvf       — V_down(s, phi(g))"
+echo "  [1] dual_repr  - V(s,g) = psi(s)^T phi(g)"
+echo "  [2] gcvf       - V_down(s, phi(g))"
 echo "============================================"
-read -rp "Your choice [1/2]: " MODE_CHOICE
+prompt_index_choice "Your choice [1/2]: " 2
 
-case "${MODE_CHOICE}" in
+case "$((CHOSEN_INDEX + 1))" in
     1) VIZ_MODE="dual_repr" ;;
     2) VIZ_MODE="gcvf" ;;
     *)
@@ -58,107 +340,27 @@ esac
 echo "→ Mode: ${VIZ_MODE}"
 
 # ============================================================
-# [Step 3] Aggregator (needed for dual_repr; also for dual
-#          checkpoint reconstruction in gcvf mode)
-# ============================================================
-echo ""
-echo "============================================"
-echo "  Select aggregator (must match training):"
-echo "  [1] inner_prod  — V = psi(s)^T phi(g)"
-echo "  [2] neg_l2      — V = -||psi(s) - phi(g)||"
-echo "============================================"
-read -rp "Your choice [1/2]: " AGG_CHOICE
-
-case "${AGG_CHOICE}" in
-    1) AGGREGATOR="inner_prod" ;;
-    2) AGGREGATOR="neg_l2" ;;
-    *)
-        echo "Invalid choice. Aborting."
-        exit 1
-        ;;
-esac
-echo "→ Aggregator: ${AGGREGATOR}"
-
-# ============================================================
-# [Step 4] Encoder mode (must match training)
-# ============================================================
-echo ""
-echo "============================================"
-echo "  Select encoder mode (must match training):"
-echo "  [1] separate  — psi(s) 와 phi(g) 별도 MLP"
-echo "  [2] shared    — psi(s) 와 phi(g) 공유 MLP"
-echo "============================================"
-read -rp "Your choice [1/2, default: 1]: " ENC_CHOICE
-ENC_CHOICE="${ENC_CHOICE:-1}"
-
-case "${ENC_CHOICE}" in
-    1) ENC_MODE="separate" ;;
-    2) ENC_MODE="shared"   ;;
-    *)
-        echo "Invalid choice. Aborting."
-        exit 1
-        ;;
-esac
-echo "→ Encoder mode: ${ENC_MODE}"
-
-# ============================================================
 # Mode-specific checkpoint selection
 # ============================================================
 
 if [ "${VIZ_MODE}" = "dual_repr" ]; then
-    SKILL_DIM=${SKILL_DIM_DUAL}
+    SKILL_DIM="${SKILL_DIM_DUAL}"
 
-    # ---- [Step 5a] Dual repr checkpoint ------------------------------------
-    HOST_CKPT_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
-    RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
+    select_dual_ckpt "Select dual_repr checkpoint:" "Your choice"
 
-    if [ ! -d "${HOST_CKPT_DIR}" ]; then
-        # legacy fallback (aggregator subdir without enc_mode)
-        HOST_CKPT_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
-        RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
-        echo "  (falling back to legacy path without enc_mode subdir)"
-    fi
-    if [ ! -d "${HOST_CKPT_DIR}" ]; then
-        HOST_CKPT_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
-        RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
-        echo "  (falling back to legacy path without aggregator subdir)"
-    fi
-
-    mapfile -t CKPT_FILES < <(ls "${HOST_CKPT_DIR}"/params_*.pkl 2>/dev/null | sort -t_ -k2 -n)
-    if [ ${#CKPT_FILES[@]} -eq 0 ]; then
-        echo "No checkpoints found in: ${HOST_CKPT_DIR}"
-        exit 1
-    fi
-
-    echo ""
-    echo "Available dual_repr checkpoints:"
-    for i in "${!CKPT_FILES[@]}"; do
-        echo "  [$((i+1))] $(basename "${CKPT_FILES[$i]}")"
-    done
-    read -rp "Your choice: " CKPT_CHOICE
-
-    if [[ "$CKPT_CHOICE" =~ ^[0-9]+$ ]] && \
-       [ "$CKPT_CHOICE" -ge 1 ] && [ "$CKPT_CHOICE" -le "${#CKPT_FILES[@]}" ]; then
-        IDX=$((CKPT_CHOICE-1))
-        RESTORE_EPOCH=$(basename "${CKPT_FILES[$IDX]}" .pkl | cut -d_ -f2)
-        echo "→ Dual repr checkpoint: step ${RESTORE_EPOCH}"
-    else
-        echo "Invalid choice. Aborting."
-        exit 1
-    fi
+    SHARE_ENCODER_FLAG="false"
+    [ "${ENC_MODE}" = "shared" ] && SHARE_ENCODER_FLAG="true"
 
     echo ""
     echo "============================================"
-    echo "  Dual Repr Heatmap + ∇V arrows"
+    echo "  Dual Repr Heatmap + grad V arrows"
     echo "  env        : ${ENV_NAME}"
     echo "  aggregator : ${AGGREGATOR}"
+    echo "  encoder    : ${ENC_MODE}"
     echo "  checkpoint : ${RESTORE_PATH} @ step ${RESTORE_EPOCH}"
     echo "  goal       : (${GOAL_X}, ${GOAL_Y})"
     echo "  output dir : ${SAVE_DIR}"
     echo "============================================"
-
-    SHARE_ENCODER_FLAG="false"
-    [ "${ENC_MODE}" = "shared" ] && SHARE_ENCODER_FLAG="true"
 
     docker run --rm \
         -v "${WORKSPACE_ROOT}:/workspace" \
@@ -180,89 +382,33 @@ if [ "${VIZ_MODE}" = "dual_repr" ]; then
                 --grid_res=${GRID_RES} \
                 --save_dir=${SAVE_DIR}
         "
-
 else
-    # ---- gcvf mode -----------------------------------------------------------
-    SKILL_DIM=${SKILL_DIM_GCVF}
+    SKILL_DIM="${SKILL_DIM_GCVF}"
 
-    # ---- [Step 4b] GCVF checkpoint ------------------------------------------
-    HOST_GCVF_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/gcvf_dual/${ENV_NAME}"
-    RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/gcvf_dual/${ENV_NAME}"
+    select_gcvf_ckpt
 
-    mapfile -t GCVF_FILES < <(ls "${HOST_GCVF_DIR}"/params_*.pkl 2>/dev/null | sort -t_ -k2 -n)
-    if [ ${#GCVF_FILES[@]} -eq 0 ]; then
-        echo "No GCVF checkpoints found in: ${HOST_GCVF_DIR}"
-        exit 1
-    fi
+    GCVF_RESTORE_EPOCH="${RESTORE_EPOCH}"
+    GCVF_RESTORE_PATH="${RESTORE_PATH}"
 
-    echo ""
-    echo "Available GCVF (phase-2) checkpoints:"
-    for i in "${!GCVF_FILES[@]}"; do
-        echo "  [$((i+1))] $(basename "${GCVF_FILES[$i]}")"
-    done
-    read -rp "Your choice: " GCVF_CHOICE
+    select_dual_ckpt "Select dual_repr checkpoint for phi(g):" "Your choice"
 
-    if [[ "$GCVF_CHOICE" =~ ^[0-9]+$ ]] && \
-       [ "$GCVF_CHOICE" -ge 1 ] && [ "$GCVF_CHOICE" -le "${#GCVF_FILES[@]}" ]; then
-        IDX=$((GCVF_CHOICE-1))
-        RESTORE_EPOCH=$(basename "${GCVF_FILES[$IDX]}" .pkl | cut -d_ -f2)
-        echo "→ GCVF checkpoint: step ${RESTORE_EPOCH}"
-    else
-        echo "Invalid choice. Aborting."
-        exit 1
-    fi
+    DUAL_RESTORE_EPOCH="${RESTORE_EPOCH}"
+    DUAL_RESTORE_PATH="${RESTORE_PATH}"
 
-    # ---- [Step 6] Dual (phase-1) checkpoint for phi(g) ----------------------
-    HOST_DUAL_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
-    DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}/${ENC_MODE}"
-
-    if [ ! -d "${HOST_DUAL_DIR}" ]; then
-        HOST_DUAL_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
-        DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}/${AGGREGATOR}"
-        echo "  (falling back to legacy path without enc_mode subdir)"
-    fi
-    if [ ! -d "${HOST_DUAL_DIR}" ]; then
-        HOST_DUAL_DIR="${WORKSPACE_ROOT}/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
-        DUAL_RESTORE_PATH="/workspace/HILP/hilp_gcrl/exp/dual_repr/${ENV_NAME}"
-        echo "  (falling back to legacy path without aggregator subdir)"
-    fi
-
-    mapfile -t DUAL_FILES < <(ls "${HOST_DUAL_DIR}"/params_*.pkl 2>/dev/null | sort -t_ -k2 -n)
-    if [ ${#DUAL_FILES[@]} -eq 0 ]; then
-        echo "No dual repr checkpoints found in: ${HOST_DUAL_DIR}"
-        exit 1
-    fi
-
-    echo ""
-    echo "Available dual_repr (phase-1) checkpoints for phi(g):"
-    for i in "${!DUAL_FILES[@]}"; do
-        echo "  [$((i+1))] $(basename "${DUAL_FILES[$i]}")"
-    done
-    read -rp "Your choice: " DUAL_CHOICE
-
-    if [[ "$DUAL_CHOICE" =~ ^[0-9]+$ ]] && \
-       [ "$DUAL_CHOICE" -ge 1 ] && [ "$DUAL_CHOICE" -le "${#DUAL_FILES[@]}" ]; then
-        IDX=$((DUAL_CHOICE-1))
-        DUAL_RESTORE_EPOCH=$(basename "${DUAL_FILES[$IDX]}" .pkl | cut -d_ -f2)
-        echo "→ Dual repr checkpoint: step ${DUAL_RESTORE_EPOCH}"
-    else
-        echo "Invalid choice. Aborting."
-        exit 1
-    fi
+    SHARE_ENCODER_FLAG="false"
+    [ "${ENC_MODE}" = "shared" ] && SHARE_ENCODER_FLAG="true"
 
     echo ""
     echo "============================================"
-    echo "  Downstream GCVF Heatmap + ∇V arrows"
+    echo "  Downstream GCVF Heatmap + grad V arrows"
     echo "  env            : ${ENV_NAME}"
     echo "  aggregator     : ${AGGREGATOR}"
-    echo "  gcvf ckpt      : ${RESTORE_PATH} @ step ${RESTORE_EPOCH}"
+    echo "  dual encoder   : ${ENC_MODE}"
+    echo "  gcvf ckpt      : ${GCVF_RESTORE_PATH} @ step ${GCVF_RESTORE_EPOCH}"
     echo "  dual ckpt      : ${DUAL_RESTORE_PATH} @ step ${DUAL_RESTORE_EPOCH}"
     echo "  goal           : (${GOAL_X}, ${GOAL_Y})"
     echo "  output dir     : ${SAVE_DIR}"
     echo "============================================"
-
-    SHARE_ENCODER_FLAG="false"
-    [ "${ENC_MODE}" = "shared" ] && SHARE_ENCODER_FLAG="true"
 
     docker run --rm \
         -v "${WORKSPACE_ROOT}:/workspace" \
@@ -275,8 +421,8 @@ else
             python3 ${PYTHON_SCRIPT} \
                 --mode=gcvf \
                 --env_name=${ENV_NAME} \
-                --restore_path=${RESTORE_PATH} \
-                --restore_epoch=${RESTORE_EPOCH} \
+                --restore_path=${GCVF_RESTORE_PATH} \
+                --restore_epoch=${GCVF_RESTORE_EPOCH} \
                 --dual_restore_path=${DUAL_RESTORE_PATH} \
                 --dual_restore_epoch=${DUAL_RESTORE_EPOCH} \
                 --skill_dim=${SKILL_DIM} \

@@ -116,19 +116,18 @@ def _compute_value_grad_field(scalar_v_fn, obs_batch, X, chunk=2000):
 
 def _normalize_grad(grads):
     """
-    Normalize gradient field by global mean/std of magnitudes (same as TD_field).
-    Returns (U_norm, V_norm, mean_scalar, std_scalar).
+    Normalize each gradient vector to unit length.
+    Zero-magnitude vectors stay zero.
+    Returns (U_unit, V_unit, mean_norm, std_norm).
     """
     U_raw = grads[:, :, 0]
     V_raw = grads[:, :, 1]
     mag = np.sqrt(U_raw**2 + V_raw**2)
     m = float(np.nanmean(mag))
-    s = float(np.nanstd(mag)) + 1e-8
-    # Shift so mean-magnitude arrows → length ≈ 1; clip to avoid direction flip
-    scale = np.clip((mag - m) / s + 1.0, 0.0, None)
-    denom = mag + 1e-8
-    U_norm = np.where(np.isnan(U_raw), np.nan, U_raw / denom * scale)
-    V_norm = np.where(np.isnan(V_raw), np.nan, V_raw / denom * scale)
+    s = float(np.nanstd(mag))
+    denom = np.where(mag > 1e-8, mag, 1.0)
+    U_norm = np.where(np.isnan(U_raw), np.nan, np.where(mag > 1e-8, U_raw / denom, 0.0))
+    V_norm = np.where(np.isnan(V_raw), np.nan, np.where(mag > 1e-8, V_raw / denom, 0.0))
     return U_norm, V_norm, m, s
 
 
@@ -331,13 +330,15 @@ def main(_):
 
     gx_s  = f'{gx:.1f}'.replace('.', '_').replace('-', 'm')
     gy_s  = f'{gy:.1f}'.replace('.', '_').replace('-', 'm')
-    # ckpt 파일명에서 timestamp 파싱: params_{step}_{YYYYMMDD}_{HHMMSS}.pkl
+    # ckpt 파일명에서 timestamp 파싱:
+    #   legacy: params_{step}_{YYYYMMDD}_{HHMMSS}.pkl
+    #   current: params_{step}_{dataset}_{YYYYMMDD}_{HHMMSS}.pkl
     _ckpt_candidates = glob.glob(
         os.path.join(FLAGS.restore_path, f'params_{FLAGS.restore_epoch}_*.pkl'))
     if _ckpt_candidates:
-        _stem = os.path.basename(_ckpt_candidates[0])[:-4]   # strip .pkl
-        _parts = _stem.split('_')  # ['params', step, YYYYMMDD, HHMMSS]
-        _ts = f'{_parts[2]}_{_parts[3]}' if len(_parts) >= 4 else 'nots'
+        _stem = os.path.basename(sorted(_ckpt_candidates)[-1])[:-4]   # strip .pkl
+        _parts = _stem.split('_')
+        _ts = f'{_parts[-2]}_{_parts[-1]}' if len(_parts) >= 4 else 'nots'
     else:
         _ts = 'nots'
     fname = (f'dual_{FLAGS.mode}_{FLAGS.env_name}'

@@ -43,9 +43,6 @@ import tqdm
 import wandb
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from sklearn.manifold import TSNE
-from shapely.geometry import Point, box
-from shapely.ops import unary_union
 from scipy.spatial import KDTree
 
 # ---- hilp_gcrl internal imports ---------------------------------------------
@@ -64,10 +61,18 @@ FLAGS = flags.FLAGS
 
 # ======================== Checkpoint I/O =====================================
 
-def save_agent(agent, save_dir, step):
+def _checkpoint_dataset_tag(dataset_name):
+    if not dataset_name:
+        return ''
+    return str(dataset_name).replace(os.sep, '-').replace(' ', '-')
+
+
+def save_agent(agent, save_dir, step, dataset_name=None):
     os.makedirs(save_dir, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path = os.path.join(save_dir, f'params_{step}_{ts}.pkl')
+    dataset_tag = _checkpoint_dataset_tag(dataset_name)
+    dataset_suffix = f'_{dataset_tag}' if dataset_tag else ''
+    path = os.path.join(save_dir, f'params_{step}{dataset_suffix}_{ts}.pkl')
     with open(path, 'wb') as f:
         pickle.dump({'agent': flax.serialization.to_state_dict(agent)}, f)
     print(f'Saved → {path}')
@@ -114,6 +119,8 @@ def _build_traversable_obs(env, obs_template):
     num_rows, num_cols = len(maze_map), len(maze_map[0]) if len(maze_map) else 0
 
     # Build shapely union of wall boxes
+    from shapely.geometry import Point, box
+    from shapely.ops import unary_union
     wall_polys = []
     for r in range(num_rows):
         for c in range(num_cols):
@@ -169,6 +176,7 @@ def generate_tsne_visualization(agent, obs_array, xy_array, step, seed, aggregat
         perplexity = 5.0
 
     print(f'  [t-SNE] Running on {psi.shape[0]} points (dim={psi.shape[1]}) ...')
+    from sklearn.manifold import TSNE
     tsne = TSNE(n_components=2, random_state=seed, perplexity=perplexity,
                 max_iter=300, init='pca', learning_rate='auto', n_jobs=-1)
     try:
@@ -894,7 +902,7 @@ def main(_):
         if step % FLAGS.save_interval == 0:
             save_agent(
                 jax.tree.map(lambda x: x[0], agent) if n_devices > 1 else agent,
-                FLAGS.save_dir, step)
+                FLAGS.save_dir, step, FLAGS.env_name)
 
     if _profiling:   # 학습이 _PROFILE_STEPS 전에 끝났을 경우 파일 닫기
         _prof_f.close()

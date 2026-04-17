@@ -214,6 +214,8 @@ def main(_):
         discount=FLAGS.discount, tau=FLAGS.tau,
         expectile=FLAGS.expectile, use_layer_norm=FLAGS.use_layer_norm,
         skill_dim=FLAGS.skill_dim,
+        aggregator=FLAGS.dual_aggregator,
+        share_encoder=FLAGS.dual_share_encoder,
     )
     dual_agent = restore_agent(dual_agent, FLAGS.dual_restore_path, FLAGS.dual_restore_epoch)
     print(f'[GCVFDual] Loaded frozen dual repr from {FLAGS.dual_restore_path}')
@@ -273,7 +275,7 @@ def main(_):
         if step % FLAGS.save_interval == 0:
             save_agent(
                 jax.tree.map(lambda x: x[0], gcvf_agent) if n_devices > 1 else gcvf_agent,
-                FLAGS.save_dir, step)
+                FLAGS.save_dir, step, FLAGS.env_name)
 
     print('[GCVFDual] Training complete.')
     if FLAGS.wandb_project:
@@ -284,6 +286,8 @@ if __name__ == '__main__':
     flags.DEFINE_string ('env_name',            'antmaze-giant-navigate-v0', 'OGBench env.')
     flags.DEFINE_string ('dual_restore_path',   'exp/dual_repr',  'Phase-1 checkpoint dir.')
     flags.DEFINE_integer('dual_restore_epoch',  1000000,          'Phase-1 checkpoint step.')
+    flags.DEFINE_string ('dual_aggregator',     'inner_prod',     'Phase-1 dual aggregator: inner_prod or neg_l2.')
+    flags.DEFINE_bool   ('dual_share_encoder',  False,            'Whether the restored Phase-1 dual checkpoint used a shared encoder.')
     flags.DEFINE_float  ('lr',                  3e-4,    'Learning rate.')
     flags.DEFINE_multi_integer('value_hidden_dims', [512, 512, 512], 'Hidden dims.')
     flags.DEFINE_integer('skill_dim',           32,      'Must match Phase-1 skill_dim.')

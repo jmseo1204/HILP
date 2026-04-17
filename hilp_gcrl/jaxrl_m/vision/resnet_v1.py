@@ -8,7 +8,7 @@ import flax.linen as nn
 import jax.numpy as jnp
 
 
-def default_init(scale: float = jnp.sqrt(2)):
+def default_init(scale: float = 2**0.5):
     return nn.initializers.orthogonal(scale)
 
 def xavier_init():
